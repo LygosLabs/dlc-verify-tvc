@@ -9,7 +9,6 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-assert_cmd = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 serde_json = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }

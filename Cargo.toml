@@ -4,6 +4,8 @@ members = [
   "crates/metrics",
   "crates/dlc-verify-tvc",
   "crates/verifier-core",
+  "crates/verifier-client",
+  "crates/verifier-policy",
   "crates/verifier-schema",
 ]
 

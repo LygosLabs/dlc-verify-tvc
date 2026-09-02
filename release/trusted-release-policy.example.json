@@ -1,0 +1,34 @@
+{
+  "release": {
+    "deploymentLabel": "REPLACE_WITH_DEPLOYMENT_LABEL",
+    "enclaveApp": "REPLACE_WITH_TVC_APP_ID",
+    "owner": "REPLACE_WITH_TURNKEY_OWNER",
+    "manifestSchemaVersion": "v2",
+    "qosManifestVersion": "REPLACE_WITH_QOS_MANIFEST_VERSION",
+    "manifestHash": "REPLACE_WITH_MANIFEST_SHA256",
+    "namespaceName": "REPLACE_WITH_QOS_NAMESPACE",
+    "namespaceNonce": 1,
+    "qosCommit": "REPLACE_WITH_QOS_COMMIT",
+    "executableDigest": "REPLACE_WITH_TVC_APP_SHA256",
+    "pcrs": {
+      "pcr0": "REPLACE_WITH_PCR0",
+      "pcr1": "REPLACE_WITH_PCR1",
+      "pcr2": "REPLACE_WITH_PCR2",
+      "pcr3": "REPLACE_WITH_TURNKEY_PRODUCTION_PCR3"
+    },
+    "manifestOperators": {
+      "threshold": 2,
+      "members": [
+        {"alias": "REPLACE_WITH_OPERATOR_1_ALIAS", "publicKey": "REPLACE_WITH_OPERATOR_1_PUBLIC_KEY"},
+        {"alias": "REPLACE_WITH_OPERATOR_2_ALIAS", "publicKey": "REPLACE_WITH_OPERATOR_2_PUBLIC_KEY"},
+        {"alias": "REPLACE_WITH_OPERATOR_3_ALIAS", "publicKey": "REPLACE_WITH_OPERATOR_3_PUBLIC_KEY"}
+      ]
+    },
+    "pivotArgs": ["--host", "0.0.0.0", "--port", "3000"],
+    "ingress": [{"port": 3000, "host": "0.0.0.0"}]
+  },
+  "deploymentControls": {
+    "pivotPath": "/tvc_app",
+    "enableEgress": false
+  }
+}

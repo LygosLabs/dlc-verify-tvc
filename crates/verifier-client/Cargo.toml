@@ -1,13 +1,18 @@
 [package]
-name = "verifier-schema"
+name = "verifier-client"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = { workspace = true }
+qos_core = { workspace = true }
+qos_hex = { workspace = true }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }
+turnkey_client = { workspace = true }
+turnkey_proofs = { workspace = true }
 
 [lints]
 workspace = true

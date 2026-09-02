@@ -1,6 +1,6 @@
 # DLC Verify Rust/TVC implementation plan
 
-Status: active  
+Status: core/API implementation complete for the frozen scope; live TVC attestation and deployment acceptance remain operational gates
 Parity target: `LygosLabs/dlc-verify` PR #9 at `e46703e7adf21ce407e150d4f46ff455ba46fd57`  
 TVC base: `tkhq/tvc-template` at `fcafd3faf2e9ff18f6a259ed049edd1e9e02423e`  
 Rust foundation: `LygosLabs/dlc-verify-tvc` at `3e620cef4405fddcf39804c9e79854d3b5daa848`
@@ -110,7 +110,7 @@ release                   Machine-readable release identity manifests
 
 - Freeze the three public Lygos fixtures plus generated minimal vectors as repository test data with provenance and hashes.
 - Produce TypeScript golden results from the frozen PR #9 commit and compare every compatibility field against Rust.
-- Add cross-language golden vectors for event ID, transcript hash, policy hash, verification digest, reconstructed transaction bytes, txids, contract ID, and proof payload request digest.
+- Add cross-language golden vectors for event ID, transcript hash, policy hash, verification digest, reconstructed transaction txids/output facts, contract ID, and proof payload request digest.
 - Add mutations for trailing bytes, malformed hex, temporary-ID mismatch, collateral/payout overflow, duplicate/missing outcomes, wrong chain hash, oracle-key mismatch, corrupted oracle announcement, wrong adaptor signatures, wrong refund signatures, wrong Sign ID, wrong funding witnesses, oversize bodies/messages, and unsupported shapes.
 - Require deterministic repeated output and no panics for arbitrary bounded input. Add property/fuzz targets for parsers, payout arithmetic, canonicalization, and policy evaluation.
 
@@ -128,21 +128,29 @@ release                   Machine-readable release identity manifests
 
 ### M1 — deterministic core parity
 
+Status: complete for the frozen single-enumerated-contract/single-oracle scope.
+
 - All supported fixture transactions and cryptographic checks match TypeScript/DDK expectations.
 - Full compatibility result is produced.
 - No required implemented check is marked unavailable for a fully signed supported fixture.
 
 ### M2 — policy/API parity
 
+Status: complete against frozen PR #9 result and policy goldens.
+
 - All PR #9 API and policy golden vectors match byte-for-byte after canonicalization.
 - Existing DLC Verify callers can switch the base URL without changing request or response handling.
 
 ### M3 — TVC relying-party completeness
 
+Status: App Proof production and the offline verifier are implemented. Acceptance remains pending a real live exact-key Boot Proof fixture. Strict authorization also remains fail-closed because Turnkey's v0.15.0 proof artifacts do not expose `pivotPath` or top-level `enableEgress`.
+
 - Standard App Proofs and exact-key Boot Proofs verify offline against a pinned release policy.
 - Negative DLC verdicts are signed and distinguishable from transport failures.
 
 ### M4 — production release candidate
+
+Status: local package candidate passes two-build reproducibility and packaged-image smoke gates. Comprehensive fuzzing, publishing, deployment, live canaries, Boot Proof capture, and `set-live-deploy` remain incomplete or explicitly out of scope without deployment authorization.
 
 - All CI, differential, fuzz/property, reproducibility, packaged-image, and enclave-proof gates pass.
 - Release identity is published and independently reproducible.

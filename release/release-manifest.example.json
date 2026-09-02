@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "lygos.dlc-verify-tvc.release.v1",
+  "sourceCommit": "REPLACE_WITH_GIT_COMMIT",
+  "compatibilityTarget": "LygosLabs/dlc-verify#9@e46703e7adf21ce407e150d4f46ff455ba46fd57",
+  "cargoLockSha256": "REPLACE_WITH_CARGO_LOCK_SHA256",
+  "containerImage": "ghcr.io/lygoslabs/dlc-verify-tvc@sha256:REPLACE_WITH_OCI_DIGEST",
+  "executablePath": "/tvc_app",
+  "executableSha256": "REPLACE_WITH_TVC_APP_SHA256",
+  "platform": "linux/amd64",
+  "qosVersion": "0.12.1",
+  "pivotArgs": ["--host", "0.0.0.0", "--port", "3000"],
+  "healthCheckPort": 3000,
+  "publicIngressPort": 3000,
+  "dangerousDeployDebugMode": false,
+  "enableEgress": false,
+  "deploymentIdentity": {
+    "appId": "REPLACE_WITH_TVC_APP_ID",
+    "deploymentId": "REPLACE_WITH_TVC_DEPLOYMENT_ID",
+    "deploymentLabel": "REPLACE_WITH_DEPLOYMENT_LABEL",
+    "manifestSetId": "REPLACE_WITH_MANIFEST_SET_ID",
+    "manifestHash": "REPLACE_WITH_MANIFEST_SHA256",
+    "qosManifestVersion": "REPLACE_WITH_QOS_MANIFEST_VERSION",
+    "qosCommit": "REPLACE_WITH_QOS_COMMIT",
+    "pcrs": {
+      "pcr0": "REPLACE_WITH_PCR0",
+      "pcr1": "REPLACE_WITH_PCR1",
+      "pcr2": "REPLACE_WITH_PCR2",
+      "pcr3": "REPLACE_WITH_TURNKEY_PRODUCTION_PCR3"
+    },
+    "manifestOperators": {
+      "threshold": 2,
+      "members": [
+        "REPLACE_WITH_OPERATOR_1_PUBLIC_KEY",
+        "REPLACE_WITH_OPERATOR_2_PUBLIC_KEY",
+        "REPLACE_WITH_OPERATOR_3_PUBLIC_KEY"
+      ]
+    }
+  },
+  "authorizationReady": false
+}

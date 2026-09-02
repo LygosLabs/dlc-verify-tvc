@@ -11,14 +11,6 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/**"
-      - "Makefile"
-      - "rust-toolchain.toml"
-  pull_request:
-    paths:
-      - ".github/**"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "crates/**"
       - "images/**"
       - "Makefile"
       - "rust-toolchain.toml"
@@ -37,7 +29,6 @@ jobs:
       tags: >-
         sha-${{ github.sha }}
         ${{ github.ref == format('refs/heads/{0}', 'main') && 'latest' || '' }}
-        ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.number) || '' }}
         ${{ github.event_name == 'push' && github.ref_name || '' }}
     strategy:
       matrix:
@@ -63,6 +54,58 @@ jobs:
         run: |
           env -C out/${{ matrix.target.name }} tar -cf - . | docker load
 
+      - name: Smoke test packaged verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_file="${RUNNER_TEMP}/qos.ephemeral.key"
+          openssl rand -hex 32 > "${key_file}"
+          docker run --rm -d \
+            --name dlc-verify-tvc-smoke \
+            --entrypoint /tvc_app \
+            -p 127.0.0.1:3000:3000 \
+            -v "${key_file}:/qos.ephemeral.key:ro" \
+            "lygoslabs-dlc-verify-tvc/${{ matrix.target.name }}:latest"
+          trap 'docker rm -f dlc-verify-tvc-smoke >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3000/health | jq -e '.status == "healthy"' >/dev/null; then
+              break
+            fi
+            if [ "${attempt}" -eq 30 ]; then
+              docker logs dlc-verify-tvc-smoke
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:3000/version \
+            | jq -e '.compatibilityTarget == "LygosLabs/dlc-verify#9@e46703e7adf21ce407e150d4f46ff455ba46fd57" and .egressRequired == false' >/dev/null
+          jq '{offer, accept, network: "regtest"}' \
+            crates/verifier-core/tests/fixtures/sample.json > "${RUNNER_TEMP}/verify-request.json"
+          curl --fail --silent \
+            -H 'content-type: application/json' \
+            --data-binary "@${RUNNER_TEMP}/verify-request.json" \
+            http://127.0.0.1:3000/api/verify \
+            | jq -e '.verificationStatus == "incomplete" and .verificationFailures == [] and .fundTxId == "fdc7dfe8e53f8fb66c40c74bc717ea1d4ed9b8c546bbdbdf2e844ecb894620dc"' >/dev/null
+
+      - name: Verify reproducible package
+        shell: bash
+        run: |
+          set -euo pipefail
+          first_oci_digest=$(jq -r '.manifests[0].digest' out/${{ matrix.target.name }}/index.json)
+          docker create --name reproduce-first \
+            "lygoslabs-dlc-verify-tvc/${{ matrix.target.name }}:latest" /bin/true
+          docker cp reproduce-first:/tvc_app "${RUNNER_TEMP}/tvc_app.first"
+          docker rm reproduce-first
+          make -B NOCACHE=1 out/${{ matrix.target.name }}/index.json
+          env -C out/${{ matrix.target.name }} tar -cf - . | docker load
+          second_oci_digest=$(jq -r '.manifests[0].digest' out/${{ matrix.target.name }}/index.json)
+          docker create --name reproduce-second \
+            "lygoslabs-dlc-verify-tvc/${{ matrix.target.name }}:latest" /bin/true
+          docker cp reproduce-second:/tvc_app "${RUNNER_TEMP}/tvc_app.second"
+          docker rm reproduce-second
+          cmp "${RUNNER_TEMP}/tvc_app.first" "${RUNNER_TEMP}/tvc_app.second"
+          test "${first_oci_digest}" = "${second_oci_digest}"
+
       - name: Upload to GHCR
         run: |
           for tag in ${tags}; do
@@ -77,6 +120,31 @@ jobs:
           container_digest=$(docker inspect --format='{{index .RepoDigests 0}}' "${container_url}" | cut -d '@' -f 2)
           docker create --name tmp-extract "${container_url}" /bin/true && docker cp tmp-extract:/tvc_app /tmp/binary && docker rm tmp-extract
           digest=$(sha256sum /tmp/binary | awk '{print $1}')
+          lock_digest=$(sha256sum Cargo.lock | awk '{print $1}')
+          mkdir -p release-output
+          jq -n \
+            --arg sourceCommit "${GITHUB_SHA}" \
+            --arg cargoLockSha256 "${lock_digest}" \
+            --arg containerImage "${container_url}@${container_digest}" \
+            --arg executableSha256 "${digest}" \
+            '{
+              schemaVersion: "lygos.dlc-verify-tvc.release.v1",
+              sourceCommit: $sourceCommit,
+              compatibilityTarget: "LygosLabs/dlc-verify#9@e46703e7adf21ce407e150d4f46ff455ba46fd57",
+              cargoLockSha256: $cargoLockSha256,
+              containerImage: $containerImage,
+              executablePath: "/tvc_app",
+              executableSha256: $executableSha256,
+              platform: "linux/amd64",
+              qosVersion: "0.12.1",
+              pivotArgs: ["--host", "0.0.0.0", "--port", "3000"],
+              healthCheckPort: 3000,
+              publicIngressPort: 3000,
+              dangerousDeployDebugMode: false,
+              enableEgress: false,
+              deploymentIdentity: null,
+              authorizationReady: false
+            }' > release-output/release-manifest.json
           echo ""
           echo "To deploy your application within TVC, use the following details:"
           echo ""
@@ -91,3 +159,9 @@ jobs:
           echo "- **Container Image URL**: \`${container_url}@${container_digest}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Executable path**: \`/tvc_app\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Expected Executable Digest**: \`${digest}\`" >> $GITHUB_STEP_SUMMARY
+      - name: Upload release identity
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.target.name }}-release-identity-${{ github.sha }}
+          path: release-output/release-manifest.json
+          if-no-files-found: error

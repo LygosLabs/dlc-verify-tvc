@@ -12,6 +12,7 @@
 use qos_p256::P256Pair;
 use std::future::Future;
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -115,7 +116,13 @@ impl Builder {
         let host_port =
             find_free_port().expect("failed to find a free port after maximum search attempts");
 
-        let server_binary = assert_cmd::cargo::cargo_bin("dlc-verify-tvc");
+        let server_binary = std::env::var_os("CARGO_BIN_EXE_dlc-verify-tvc")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join("target/debug/dlc-verify-tvc")
+            });
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
         let ephemeral_key_path = temp_dir.path().join("qos.ephemeral.key");
         P256Pair::generate()

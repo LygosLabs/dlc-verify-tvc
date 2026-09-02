@@ -1,20 +1,25 @@
 //! Deterministic, side-effect-free DLC transcript verification.
 
+mod reconstruction;
+
+use std::collections::HashSet;
+
 use bitcoin::{
     Amount, Network as BitcoinNetwork, blockdata::constants::genesis_block, hashes::Hash as _,
 };
 use ddk_messages::{
     AcceptDlc, OfferDlc, SignDlc,
     contract_msgs::{ContractDescriptor, ContractInfo},
-    oracle_msgs::OracleInfo,
+    oracle_msgs::{EventDescriptor, OracleInfo},
 };
 use lightning::{io::Cursor, util::ser::Readable};
 use secp256k1_zkp::Secp256k1;
 use sha2::{Digest, Sha256};
 use verifier_schema::{
-    MAX_DLC_MESSAGE_BYTES, Network, OracleEventExpectation, OracleEventPreimage, OutcomeInfo,
-    VerificationCheck, VerificationPolicy, VerificationRequest, VerificationResult,
-    VerificationStatus,
+    CetTransactionInfo, DlcVerifyResult, FundingInputInfo, MAX_DLC_MESSAGE_BYTES, Network,
+    OracleEventExpectation, OracleEventPreimage, OraclePubkeySource, OutcomeInfo,
+    TransactionOutputInfo, VerificationCheck, VerificationPolicy, VerificationRequest,
+    VerificationResult, VerificationStatus,
 };
 
 /// Errors which prevent the verifier from producing a parsed result.
@@ -158,11 +163,465 @@ fn amount_string(amount: Amount) -> String {
     amount.to_sat().to_string()
 }
 
-fn normalize_expected_oracle_pubkey(value: &str) -> Option<String> {
+fn normalize_expected_oracle_pubkey(value: &str) -> Result<Option<String>, String> {
     let normalized = value.trim().to_ascii_lowercase();
     let normalized = normalized.strip_prefix("0x").unwrap_or(&normalized);
-    (normalized.len() == 64 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then(|| normalized.to_owned())
+    let normalized = normalized
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    if !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Oracle pubkey must be hex".to_owned());
+    }
+    if normalized.len() != 64 {
+        return Err("Oracle pubkey must be a 32-byte x-only pubkey (64 hex chars)".to_owned());
+    }
+    Ok(Some(normalized))
+}
+
+fn rendering_network(value: Option<&str>) -> (&'static str, BitcoinNetwork) {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("testnet") => ("testnet", BitcoinNetwork::Testnet),
+        Some("regtest") => ("regtest", BitcoinNetwork::Regtest),
+        _ => ("mainnet", BitcoinNetwork::Bitcoin),
+    }
+}
+
+fn chain_hash_network_name(chain_hash: &[u8; 32]) -> Option<String> {
+    [
+        (BitcoinNetwork::Bitcoin, "mainnet"),
+        (BitcoinNetwork::Testnet, "testnet"),
+        (BitcoinNetwork::Regtest, "regtest"),
+    ]
+    .into_iter()
+    .find_map(|(network, name)| {
+        (chain_hash == &genesis_block(network).block_hash().to_byte_array())
+            .then(|| name.to_owned())
+    })
+}
+
+fn validate_enumerated_oracle_event(
+    descriptor: &ddk_messages::contract_msgs::EnumeratedContractDescriptor,
+    oracle_event_descriptor: &EventDescriptor,
+) -> Result<(), String> {
+    let EventDescriptor::EnumEvent(oracle_descriptor) = oracle_event_descriptor else {
+        return Err(
+            "enumerated contracts require an enumerated oracle event descriptor".to_owned(),
+        );
+    };
+    if descriptor.payouts.len() != oracle_descriptor.outcomes.len() {
+        return Err(format!(
+            "contract and oracle outcome counts differ: contract={} oracle={}",
+            descriptor.payouts.len(),
+            oracle_descriptor.outcomes.len()
+        ));
+    }
+    let contract_outcomes = descriptor
+        .payouts
+        .iter()
+        .map(|payout| payout.outcome.as_str())
+        .collect::<HashSet<_>>();
+    let oracle_outcomes = oracle_descriptor
+        .outcomes
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    if contract_outcomes.len() != descriptor.payouts.len()
+        || oracle_outcomes.len() != oracle_descriptor.outcomes.len()
+    {
+        return Err("contract and oracle outcomes must each be unique".to_owned());
+    }
+    if contract_outcomes != oracle_outcomes {
+        return Err("contract outcomes do not match the signed oracle outcome set".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_contract_maturity(offer: &OfferDlc, event_maturity_epoch: u32) -> Result<(), String> {
+    if offer.cet_locktime > event_maturity_epoch {
+        return Err(format!(
+            "CET locktime {} is after oracle event maturity {event_maturity_epoch}",
+            offer.cet_locktime
+        ));
+    }
+    if offer.refund_locktime <= event_maturity_epoch {
+        return Err(format!(
+            "refund locktime {} must be after oracle event maturity {event_maturity_epoch}",
+            offer.refund_locktime
+        ));
+    }
+    Ok(())
+}
+
+fn address_for_script(script: &bitcoin::ScriptBuf, network: BitcoinNetwork) -> Option<String> {
+    bitcoin::Address::from_script(script, network)
+        .ok()
+        .map(|address| address.to_string())
+}
+
+fn finalize_compatibility_status(result: &mut DlcVerifyResult, sign_requested: bool) {
+    let mut failures = std::mem::take(&mut result.verification_failures);
+    let mut incomplete = std::mem::take(&mut result.verification_incomplete);
+
+    if result.error.is_some() {
+        failures.push("message-parsing-or-reconstruction-failed".to_owned());
+    }
+    if result.expected_oracle_pubkey.is_some()
+        && result.oracle_pubkey_matches_expected != Some(true)
+    {
+        failures.push("oracle-pubkey-mismatch-or-unavailable".to_owned());
+    }
+    if !result.oracle_sig_valid {
+        failures.push("oracle-announcement-signature-invalid".to_owned());
+    }
+    if !result.adaptor_sig_verification_available {
+        failures.push("accepter-adaptor-verification-unavailable".to_owned());
+    } else if result.adaptor_valid != Some(true) {
+        failures.push("accepter-adaptor-signatures-invalid".to_owned());
+    }
+    if result.refund_sig_valid != Some(true) {
+        failures.push("accepter-refund-signature-invalid-or-unavailable".to_owned());
+    }
+
+    if !sign_requested {
+        incomplete.push("dlc-sign-not-provided".to_owned());
+    } else if !result.sign_available {
+        failures.push("dlc-sign-invalid-or-unparseable".to_owned());
+    } else {
+        if result.sign_contract_id_matches != Some(true) {
+            failures.push("sign-contract-id-mismatch-or-unavailable".to_owned());
+        }
+        if result.sign_adaptor_valid != Some(true) {
+            failures.push("offerer-adaptor-signatures-invalid-or-unavailable".to_owned());
+        }
+        if result.sign_refund_sig_valid != Some(true) {
+            failures.push("offerer-refund-signature-invalid-or-unavailable".to_owned());
+        }
+    }
+
+    failures.dedup();
+    incomplete.dedup();
+    result.verification_status = if failures.is_empty() {
+        if incomplete.is_empty() {
+            VerificationStatus::Pass
+        } else {
+            VerificationStatus::Incomplete
+        }
+    } else {
+        VerificationStatus::Fail
+    };
+    result.verification_failures = failures;
+    result.verification_incomplete = incomplete;
+}
+
+fn compatibility_parse_failure(
+    mut result: DlcVerifyResult,
+    sign_requested: bool,
+    error: impl Into<String>,
+) -> DlcVerifyResult {
+    result.error = Some(error.into());
+    finalize_compatibility_status(&mut result, sign_requested);
+    result
+}
+
+/// Reproduce the PR #9 DLC Verify result with DDK-native Rust verification.
+///
+/// Malformed or unsupported bounded inputs produce a structured fail-closed result rather than
+/// an unsigned application error. The function is deterministic and performs no I/O.
+#[must_use]
+pub fn verify_dlc_compatibility(
+    offer_hex: &str,
+    accept_hex: &str,
+    sign_hex: Option<&str>,
+    expected_oracle_pubkey: Option<&str>,
+    network: Option<&str>,
+) -> DlcVerifyResult {
+    let sign_requested = sign_hex.is_some();
+    let (network_name, bitcoin_network) = rendering_network(network);
+    let offer_bytes = decode_hex("offer", offer_hex).unwrap_or_default();
+    let accept_bytes = decode_hex("accept", accept_hex).unwrap_or_default();
+    let sign_bytes = sign_hex.and_then(|value| decode_hex("sign", value).ok());
+    let mut result = DlcVerifyResult {
+        network: network_name.to_owned(),
+        transcript_hash: transcript_hash(&offer_bytes, &accept_bytes, sign_bytes.as_deref()),
+        ..DlcVerifyResult::default()
+    };
+    let normalized_expected = match expected_oracle_pubkey
+        .map(normalize_expected_oracle_pubkey)
+        .transpose()
+    {
+        Ok(value) => value.flatten(),
+        Err(error) => return compatibility_parse_failure(result, sign_requested, error),
+    };
+    result.expected_oracle_pubkey = normalized_expected.clone();
+    result.oracle_pubkey_source = if normalized_expected.is_some() {
+        OraclePubkeySource::Provided
+    } else {
+        OraclePubkeySource::Derived
+    };
+
+    let offer: OfferDlc =
+        match decode_hex("offer", offer_hex).and_then(|bytes| strict_read("offer", &bytes)) {
+            Ok(offer) => offer,
+            Err(error) => {
+                return compatibility_parse_failure(result, sign_requested, error.to_string());
+            }
+        };
+    let accept: AcceptDlc =
+        match decode_hex("accept", accept_hex).and_then(|bytes| strict_read("accept", &bytes)) {
+            Ok(accept) => accept,
+            Err(error) => {
+                return compatibility_parse_failure(result, sign_requested, error.to_string());
+            }
+        };
+    if offer.temporary_contract_id != accept.temporary_contract_id {
+        return compatibility_parse_failure(
+            result,
+            sign_requested,
+            "Offer and Accept temporary contract IDs do not match",
+        );
+    }
+
+    let sign = match sign_hex {
+        Some(value) => {
+            match decode_hex("sign", value).and_then(|bytes| strict_read("sign", &bytes)) {
+                Ok(sign) => {
+                    result.sign_available = true;
+                    Some(sign)
+                }
+                Err(error) => {
+                    let message = format!("Failed to parse sign message: {error}");
+                    result.sign_adaptor_error = Some(message.clone());
+                    result.sign_refund_sig_error = Some(message);
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    result.sign_contract_id = sign
+        .as_ref()
+        .map(|sign: &SignDlc| hex::encode(sign.contract_id));
+
+    let (descriptor, announcement) = match &offer.contract_info {
+        ContractInfo::SingleContractInfo(single) => {
+            let descriptor = match &single.contract_info.contract_descriptor {
+                ContractDescriptor::EnumeratedContractDescriptor(descriptor) => descriptor,
+                ContractDescriptor::NumericOutcomeContractDescriptor(_) => {
+                    return compatibility_parse_failure(
+                        result,
+                        sign_requested,
+                        "Adaptor signature verification currently supports EnumeratedDescriptor contracts only",
+                    );
+                }
+            };
+            let announcement = match &single.contract_info.oracle_info {
+                OracleInfo::Single(oracle) => &oracle.oracle_announcement,
+                OracleInfo::Multi(_) => {
+                    return compatibility_parse_failure(
+                        result,
+                        sign_requested,
+                        "Adaptor signature verification currently supports one oracle only",
+                    );
+                }
+            };
+            (descriptor, announcement)
+        }
+        ContractInfo::DisjointContractInfo(_) => {
+            return compatibility_parse_failure(
+                result,
+                sign_requested,
+                "Adaptor signature verification does not support disjoint contracts",
+            );
+        }
+    };
+    if let Err(error) =
+        validate_enumerated_oracle_event(descriptor, &announcement.oracle_event.event_descriptor)
+    {
+        return compatibility_parse_failure(result, sign_requested, error);
+    }
+    if let Err(error) =
+        validate_contract_maturity(&offer, announcement.oracle_event.event_maturity_epoch)
+    {
+        return compatibility_parse_failure(result, sign_requested, error);
+    }
+
+    let total_collateral = offer.get_total_collateral();
+    result.chain_hash_network = chain_hash_network_name(&offer.chain_hash);
+    result.contract_type = Some("Enumerated".to_owned());
+    result.total_collateral = Some(amount_string(total_collateral));
+    result.offer_collateral = Some(amount_string(offer.offer_collateral));
+    result.accept_collateral = Some(amount_string(accept.accept_collateral));
+    result.outcomes = descriptor
+        .payouts
+        .iter()
+        .map(|payout| OutcomeInfo {
+            label: payout.outcome.clone(),
+            offerer_sats: amount_string(payout.offer_payout),
+            accepter_sats: total_collateral
+                .checked_sub(payout.offer_payout)
+                .map_or_else(|| "0".to_owned(), amount_string),
+        })
+        .collect();
+    result.cet_locktime = Some(offer.cet_locktime);
+    result.refund_locktime = Some(offer.refund_locktime);
+    result.fee_rate_per_vb = Some(offer.fee_rate_per_vb.to_string());
+    result.offerer_funding_pubkey = Some(offer.funding_pubkey.to_string());
+    result.accepter_funding_pubkey = Some(accept.funding_pubkey.to_string());
+    result.offerer_payout_address = address_for_script(&offer.payout_spk, bitcoin_network);
+    result.offerer_change_address = address_for_script(&offer.change_spk, bitcoin_network);
+    result.accepter_payout_address = address_for_script(&accept.payout_spk, bitcoin_network);
+    result.accepter_change_address = address_for_script(&accept.change_spk, bitcoin_network);
+
+    let extracted_oracle_pubkey = announcement.oracle_public_key.to_string();
+    result.extracted_oracle_pubkey = Some(extracted_oracle_pubkey.clone());
+    result.oracle_pubkey = normalized_expected
+        .clone()
+        .or_else(|| Some(extracted_oracle_pubkey.clone()));
+    result.oracle_pubkey_matches_expected = normalized_expected
+        .as_ref()
+        .map(|expected| expected == &extracted_oracle_pubkey);
+    result.oracle_event_id = Some(announcement.oracle_event.event_id.clone());
+    let secp = Secp256k1::verification_only();
+    match announcement.validate(&secp) {
+        Ok(()) => result.oracle_sig_valid = true,
+        Err(error) => result.oracle_sig_error = Some(error.to_string()),
+    }
+
+    let reconstruction =
+        match reconstruction::reconstruct(&offer, &accept, descriptor, bitcoin_network) {
+            Ok(reconstruction) => reconstruction,
+            Err(error) => return compatibility_parse_failure(result, sign_requested, error),
+        };
+    let funding_script = &reconstruction.transactions.funding_script_pubkey;
+    result.witness_script = Some(hex::encode(funding_script.as_bytes()));
+    result.funding_address = address_for_script(&funding_script.to_p2wsh(), bitcoin_network);
+    result.offer_inputs = reconstruction
+        .offer_inputs
+        .iter()
+        .map(|input| FundingInputInfo {
+            outpoint: input.outpoint.clone(),
+            sats: Some(input.sats.clone()),
+        })
+        .collect();
+    result.accept_inputs = reconstruction
+        .accept_inputs
+        .iter()
+        .map(|input| FundingInputInfo {
+            outpoint: input.outpoint.clone(),
+            sats: Some(input.sats.clone()),
+        })
+        .collect();
+    result.contract_id = Some(hex::encode(reconstruction.contract_id));
+    result.fund_output_index = Some(reconstruction.fund_output_index);
+    result.funding_value_sats = Some(reconstruction.funding_value.to_sat().to_string());
+    result.fund_tx_id = Some(reconstruction.transactions.fund.compute_txid().to_string());
+    result.cet_count = Some(reconstruction.transactions.cets.len());
+    result.refund_tx_id = Some(
+        reconstruction
+            .transactions
+            .refund
+            .compute_txid()
+            .to_string(),
+    );
+    result.refund_outputs = reconstruction
+        .refund_outputs
+        .iter()
+        .map(|output| TransactionOutputInfo {
+            index: output.index,
+            sats: output.sats.clone(),
+            script_pub_key: output.script_pubkey.clone(),
+            address: output.address.clone(),
+        })
+        .collect();
+    result.cets = reconstruction
+        .cets
+        .iter()
+        .map(|cet| CetTransactionInfo {
+            outcome: cet.outcome.clone(),
+            txid: cet.txid.clone(),
+            locktime: cet.locktime,
+            outputs: cet
+                .outputs
+                .iter()
+                .map(|output| TransactionOutputInfo {
+                    index: output.index,
+                    sats: output.sats.clone(),
+                    script_pub_key: output.script_pubkey.clone(),
+                    address: output.address.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+
+    let signatures = reconstruction::verify_signatures(
+        &offer,
+        &accept,
+        sign.as_ref(),
+        descriptor,
+        announcement,
+        &reconstruction,
+    );
+    result.adaptor_sig_verification_available = true;
+    result.adaptor_valid = Some(signatures.accept_adaptor_valid);
+    result.adaptor_valid_count = signatures.accept_adaptor_valid_count;
+    result.adaptor_total_count = signatures.accept_adaptor_total_count;
+    result.adaptor_error = (!signatures.accept_adaptor_valid)
+        .then(|| "DDK verifyCetAdaptorSigsFromOracleInfo returned false".to_owned());
+    result.refund_sig_valid = Some(signatures.accept_refund_valid);
+    result.refund_sig_error = (!signatures.accept_refund_valid)
+        .then(|| "Accepter refund signature verification failed".to_owned());
+    result.sign_contract_id_matches = signatures.sign_contract_id_matches;
+    result.sign_adaptor_valid = signatures.sign_adaptor_valid;
+    result.sign_adaptor_valid_count = signatures.sign_adaptor_valid_count;
+    result.sign_adaptor_total_count = signatures.sign_adaptor_total_count;
+    result.sign_adaptor_error = signatures
+        .sign_adaptor_valid
+        .is_some_and(|valid| !valid)
+        .then(|| "DDK verification of offerer CET adaptor signatures returned false".to_owned());
+    result.sign_refund_sig_valid = signatures.sign_refund_valid;
+    result.sign_refund_sig_error = signatures
+        .sign_refund_valid
+        .is_some_and(|valid| !valid)
+        .then(|| "Offerer refund signature verification failed".to_owned());
+    result.adaptor_sig_verification_note = Some(if signatures.accept_adaptor_valid {
+        format!(
+            "All {} CET adaptor signatures cryptographically valid (DDK)",
+            signatures.accept_adaptor_total_count
+        )
+    } else {
+        "Adaptor signature verification failed".to_owned()
+    });
+    if signatures.sign_protocol_valid == Some(false) {
+        result
+            .verification_failures
+            .push("unsupported-sign-protocol-version".to_owned());
+    }
+    if signatures.sign_funding_witnesses.valid == Some(false) {
+        result
+            .verification_failures
+            .push("offerer-funding-signatures-invalid".to_owned());
+    }
+    if signatures.sign_funding_witnesses.valid.is_none()
+        && !signatures.sign_funding_witnesses.incomplete.is_empty()
+    {
+        result
+            .verification_incomplete
+            .push("offerer-funding-signature-verification-unsupported".to_owned());
+    }
+    // Counts and the safe diagnostic are retained for audit logging by higher-level callers even
+    // though the frozen PR #9 wire schema has no funding-witness fields.
+    let _funding_witness_audit = (
+        signatures.sign_funding_witnesses.valid_count,
+        signatures.sign_funding_witnesses.total_count,
+        signatures.sign_funding_witnesses.error.as_deref(),
+    );
+
+    finalize_compatibility_status(&mut result, sign_requested);
+    result
 }
 
 /// Verify and summarize a DLC negotiation transcript without network or filesystem access.
@@ -420,7 +879,7 @@ fn evaluate_policy(
         );
     }
     if let Some(expected) = &policy.expected_oracle_pubkey {
-        let normalized = normalize_expected_oracle_pubkey(expected);
+        let normalized = normalize_expected_oracle_pubkey(expected).ok().flatten();
         push_check(
             checks,
             failures,
@@ -473,9 +932,161 @@ mod tests {
         let key = "AA".repeat(32);
         assert_eq!(
             normalize_expected_oracle_pubkey(&format!("  0x{key}  ")),
-            Some("aa".repeat(32))
+            Ok(Some("aa".repeat(32)))
         );
-        assert_eq!(normalize_expected_oracle_pubkey("abcd"), None);
-        assert_eq!(normalize_expected_oracle_pubkey(&"zz".repeat(32)), None);
+        assert_eq!(
+            normalize_expected_oracle_pubkey(&format!("0x{} {}", "AA".repeat(16), "BB".repeat(16))),
+            Ok(Some(format!("{}{}", "aa".repeat(16), "bb".repeat(16))))
+        );
+        assert_eq!(normalize_expected_oracle_pubkey("   "), Ok(None));
+        assert_eq!(
+            normalize_expected_oracle_pubkey("abcd"),
+            Err("Oracle pubkey must be a 32-byte x-only pubkey (64 hex chars)".to_owned())
+        );
+        assert_eq!(
+            normalize_expected_oracle_pubkey(&"zz".repeat(32)),
+            Err("Oracle pubkey must be hex".to_owned())
+        );
+    }
+
+    #[test]
+    fn compatibility_chain_hashes_match_pr9_exactly() {
+        for (network, expected) in [
+            (BitcoinNetwork::Bitcoin, "mainnet"),
+            (BitcoinNetwork::Testnet, "testnet"),
+            (BitcoinNetwork::Regtest, "regtest"),
+        ] {
+            assert_eq!(
+                chain_hash_network_name(&genesis_block(network).block_hash().to_byte_array()),
+                Some(expected.to_owned())
+            );
+        }
+
+        assert_eq!(
+            chain_hash_network_name(
+                &genesis_block(BitcoinNetwork::Testnet4)
+                    .block_hash()
+                    .to_byte_array()
+            ),
+            None
+        );
+        let reversed_testnet: [u8; 32] = hex::decode(
+            genesis_block(BitcoinNetwork::Testnet)
+                .block_hash()
+                .to_string(),
+        )
+        .expect("display hash must be hex")
+        .try_into()
+        .expect("block hash must be 32 bytes");
+        assert_eq!(chain_hash_network_name(&reversed_testnet), None);
+    }
+
+    #[test]
+    fn enumerated_contract_requires_the_exact_unique_oracle_outcome_set() {
+        use bitcoin::Amount;
+        use ddk_messages::{
+            contract_msgs::{ContractOutcome, EnumeratedContractDescriptor},
+            oracle_msgs::{
+                DigitDecompositionEventDescriptor, EnumEventDescriptor, EventDescriptor,
+            },
+        };
+
+        let descriptor = EnumeratedContractDescriptor {
+            payouts: vec![
+                ContractOutcome {
+                    outcome: "repaid".to_owned(),
+                    offer_payout: Amount::from_sat(1),
+                },
+                ContractOutcome {
+                    outcome: "defaulted".to_owned(),
+                    offer_payout: Amount::ZERO,
+                },
+            ],
+        };
+        let exact_reordered = EventDescriptor::EnumEvent(EnumEventDescriptor {
+            outcomes: vec!["defaulted".to_owned(), "repaid".to_owned()],
+        });
+        assert!(validate_enumerated_oracle_event(&descriptor, &exact_reordered).is_ok());
+
+        let mismatched = EventDescriptor::EnumEvent(EnumEventDescriptor {
+            outcomes: vec!["repaid".to_owned(), "liquidated".to_owned()],
+        });
+        assert!(validate_enumerated_oracle_event(&descriptor, &mismatched).is_err());
+
+        let duplicate = EventDescriptor::EnumEvent(EnumEventDescriptor {
+            outcomes: vec!["repaid".to_owned(), "repaid".to_owned()],
+        });
+        assert!(validate_enumerated_oracle_event(&descriptor, &duplicate).is_err());
+
+        let numeric = EventDescriptor::DigitDecompositionEvent(DigitDecompositionEventDescriptor {
+            base: 2,
+            is_signed: false,
+            unit: "sats".to_owned(),
+            precision: 0,
+            nb_digits: 1,
+        });
+        assert!(validate_enumerated_oracle_event(&descriptor, &numeric).is_err());
+    }
+
+    #[test]
+    fn contract_locktimes_must_bracket_oracle_maturity() {
+        let mut offer = OfferDlc {
+            protocol_version: 1,
+            contract_flags: 0,
+            chain_hash: [0; 32],
+            temporary_contract_id: [0; 32],
+            contract_info: ContractInfo::DisjointContractInfo(
+                ddk_messages::contract_msgs::DisjointContractInfo {
+                    total_collateral: Amount::ZERO,
+                    contract_infos: Vec::new(),
+                },
+            ),
+            funding_pubkey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                .parse()
+                .expect("generator public key"),
+            payout_spk: bitcoin::ScriptBuf::new(),
+            payout_serial_id: 0,
+            offer_collateral: Amount::ZERO,
+            funding_inputs: Vec::new(),
+            change_spk: bitcoin::ScriptBuf::new(),
+            change_serial_id: 1,
+            fund_output_serial_id: 2,
+            fee_rate_per_vb: 1,
+            cet_locktime: 10,
+            refund_locktime: 30,
+        };
+        assert!(validate_contract_maturity(&offer, 20).is_ok());
+
+        offer.cet_locktime = 21;
+        assert!(validate_contract_maturity(&offer, 20).is_err());
+
+        offer.cet_locktime = 10;
+        offer.refund_locktime = 20;
+        assert!(validate_contract_maturity(&offer, 20).is_err());
+    }
+
+    #[test]
+    fn malformed_supplied_oracle_key_fails_closed() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/testnet-loan-118c9fc9.json"))
+                .expect("fixture must be JSON");
+        let result = verify_dlc_compatibility(
+            fixture["offer"].as_str().expect("fixture offer"),
+            fixture["accept"].as_str().expect("fixture accept"),
+            fixture["sign"].as_str(),
+            Some("not-a-public-key"),
+            Some("regtest"),
+        );
+
+        assert_eq!(result.verification_status, VerificationStatus::Fail);
+        assert_eq!(result.expected_oracle_pubkey, None);
+        assert_eq!(result.oracle_pubkey_source, OraclePubkeySource::Derived);
+        assert_eq!(result.error.as_deref(), Some("Oracle pubkey must be hex"));
+        assert!(
+            result
+                .verification_failures
+                .iter()
+                .any(|failure| failure == "message-parsing-or-reconstruction-failed")
+        );
     }
 }

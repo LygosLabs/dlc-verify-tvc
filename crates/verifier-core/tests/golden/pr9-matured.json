@@ -1,0 +1,148 @@
+{
+  "network": "regtest",
+  "chainHashNetwork": "regtest",
+  "contractType": "Enumerated",
+  "totalCollateral": "20000",
+  "offerCollateral": "20000",
+  "acceptCollateral": "0",
+  "outcomes": [
+    {
+      "label": "not-paid",
+      "offererSats": "20000",
+      "accepterSats": "0"
+    },
+    {
+      "label": "repaid",
+      "offererSats": "20000",
+      "accepterSats": "0"
+    },
+    {
+      "label": "liquidated-by-maturation-date",
+      "offererSats": "0",
+      "accepterSats": "20000"
+    },
+    {
+      "label": "liquidated-by-price-threshold",
+      "offererSats": "0",
+      "accepterSats": "20000"
+    }
+  ],
+  "oraclePubkey": "8731249d979def2d5d76c61795969e953807d37ff36ef8dbab60d57ae08bb004",
+  "extractedOraclePubkey": "8731249d979def2d5d76c61795969e953807d37ff36ef8dbab60d57ae08bb004",
+  "expectedOraclePubkey": null,
+  "oraclePubkeySource": "derived",
+  "oraclePubkeyMatchesExpected": null,
+  "oracleEventId": "loan-matured-7932e4c2f5136ca3d83e5079876bd19311bb61db3e40e328e4e18c38cb1d3452",
+  "oracleSigValid": true,
+  "oracleSigError": null,
+  "cetLocktime": 1767138836,
+  "refundLocktime": 1775491200,
+  "feeRatePerVb": "3",
+  "offererFundingPubkey": "036eb76057911e044f21ff936e44d559e50e8205115b398873663062978d59ca53",
+  "accepterFundingPubkey": "03903300005c2442e25c16cc27491e27cac1f694873c66f3754290be363909378c",
+  "fundingAddress": "bcrt1qj44rqqg520h6ln5n3w5m32r87nqhg8m47ypx2vwt795yp9xu46ts633upd",
+  "witnessScript": "5221036eb76057911e044f21ff936e44d559e50e8205115b398873663062978d59ca532103903300005c2442e25c16cc27491e27cac1f694873c66f3754290be363909378c52ae",
+  "offererPayoutAddress": "bcrt1qcnqeh4j73cqcs76zx0faqzht4q2wxtnswyxhr7",
+  "offererChangeAddress": "bcrt1qp2hhewqq3add3p57z0687jgdfnq79pc2ddqnka",
+  "accepterPayoutAddress": "bcrt1qdj54xx83x927zplv4m5fh6yq7c2gs525pv0xxc",
+  "accepterChangeAddress": "bcrt1qdj54xx83x927zplv4m5fh6yq7c2gs525pv0xxc",
+  "offerInputs": [
+    {
+      "outpoint": "00372df757b8166c6109b0b3f6f21f9e44037ef63c1600d7ec891c87b88e9397:1",
+      "sats": "1233606"
+    }
+  ],
+  "acceptInputs": [],
+  "contractId": "882f2ffd2fb8cdfa3395daef064c42f9d3df9e03089c227a73880c62cbc301b7",
+  "transcriptHash": "fa8fe1a048c54304e90c9efd618cb4b7c47a82f5d19da5c5bc5fafd6faf4b1ca",
+  "fundOutputIndex": 0,
+  "fundingValueSats": "20441",
+  "refundTxId": "5ccfca200a6e1f79a96aa525e9adc84544406281d438823e373b914b388a5963",
+  "refundOutputs": [
+    {
+      "index": 0,
+      "sats": "20000",
+      "scriptPubKey": "0014c4c19bd65e8e01887b4233d3d00aeba814e32e70",
+      "address": "bcrt1qcnqeh4j73cqcs76zx0faqzht4q2wxtnswyxhr7"
+    }
+  ],
+  "cets": [
+    {
+      "outcome": "not-paid",
+      "txid": "153e588e053eb7636aad5e3dfffbc8cecbeb5ed515da67f30a837d13aac5ff21",
+      "locktime": 1767138836,
+      "outputs": [
+        {
+          "index": 0,
+          "sats": "20000",
+          "scriptPubKey": "0014c4c19bd65e8e01887b4233d3d00aeba814e32e70",
+          "address": "bcrt1qcnqeh4j73cqcs76zx0faqzht4q2wxtnswyxhr7"
+        }
+      ]
+    },
+    {
+      "outcome": "repaid",
+      "txid": "153e588e053eb7636aad5e3dfffbc8cecbeb5ed515da67f30a837d13aac5ff21",
+      "locktime": 1767138836,
+      "outputs": [
+        {
+          "index": 0,
+          "sats": "20000",
+          "scriptPubKey": "0014c4c19bd65e8e01887b4233d3d00aeba814e32e70",
+          "address": "bcrt1qcnqeh4j73cqcs76zx0faqzht4q2wxtnswyxhr7"
+        }
+      ]
+    },
+    {
+      "outcome": "liquidated-by-maturation-date",
+      "txid": "e5f2c35345b5a59ac6c29145ba4bca64071b3db2efc4a81235e71e09497e7b79",
+      "locktime": 1767138836,
+      "outputs": [
+        {
+          "index": 0,
+          "sats": "20000",
+          "scriptPubKey": "00146ca95318f13155e107ecaee89be880f614885154",
+          "address": "bcrt1qdj54xx83x927zplv4m5fh6yq7c2gs525pv0xxc"
+        }
+      ]
+    },
+    {
+      "outcome": "liquidated-by-price-threshold",
+      "txid": "e5f2c35345b5a59ac6c29145ba4bca64071b3db2efc4a81235e71e09497e7b79",
+      "locktime": 1767138836,
+      "outputs": [
+        {
+          "index": 0,
+          "sats": "20000",
+          "scriptPubKey": "00146ca95318f13155e107ecaee89be880f614885154",
+          "address": "bcrt1qdj54xx83x927zplv4m5fh6yq7c2gs525pv0xxc"
+        }
+      ]
+    }
+  ],
+  "adaptorSigVerificationAvailable": true,
+  "adaptorSigVerificationNote": "All 4 CET adaptor signatures cryptographically valid (DDK)",
+  "fundTxId": "fdc7dfe8e53f8fb66c40c74bc717ea1d4ed9b8c546bbdbdf2e844ecb894620dc",
+  "cetCount": 4,
+  "adaptorValid": true,
+  "adaptorValidCount": 4,
+  "adaptorTotalCount": 4,
+  "adaptorError": null,
+  "refundSigValid": true,
+  "refundSigError": null,
+  "signAvailable": false,
+  "signContractId": null,
+  "signContractIdMatches": null,
+  "signAdaptorValid": null,
+  "signAdaptorValidCount": 0,
+  "signAdaptorTotalCount": 0,
+  "signAdaptorError": null,
+  "signRefundSigValid": null,
+  "signRefundSigError": null,
+  "verificationStatus": "incomplete",
+  "verificationFailures": [],
+  "verificationIncomplete": [
+    "dlc-sign-not-provided"
+  ],
+  "error": null
+}

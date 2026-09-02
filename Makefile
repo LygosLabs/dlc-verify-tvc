@@ -8,11 +8,11 @@ all: build
 
 .PHONY: build
 build:
-	cargo build --all
+	cargo build --locked --all
 
 .PHONY: test
 test: build
-	cargo test --all-targets
+	cargo test --locked --all-targets
 
 .PHONY: fmt
 fmt:
@@ -21,7 +21,7 @@ fmt:
 .PHONY: lint
 lint:
 	cargo clippy --version
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --locked --all-targets -- -D warnings
 
 # Generate keys to simulate QOS control.
 .PHONY: local-keys

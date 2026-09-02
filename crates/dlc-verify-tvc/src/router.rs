@@ -92,7 +92,7 @@ mod tests {
             serde_json::from_str(&proof.proof_payload).expect("proof payload must be JSON");
         assert_eq!(payload["challenge"], "proof-roundtrip");
         assert_eq!(
-            payload["result"]["schemaVersion"],
+            payload["result"]["attestationPayload"]["schemaVersion"],
             "lygos.dlc-verification.v1"
         );
     }
@@ -102,7 +102,8 @@ mod tests {
         let fixture = fixture_request();
         let request = serde_json::json!({
             "offer": fixture["offer"],
-            "accept": fixture["accept"]
+            "accept": fixture["accept"],
+            "network": "regtest"
         });
         let app = router_with_state(AppState::new(P256Pair::generate().unwrap()));
         let response = app
@@ -115,6 +116,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("body must collect")
+                .to_bytes(),
+        )
+        .expect("response must be JSON");
+        let golden: serde_json::Value = serde_json::from_str(include_str!(
+            "../../verifier-core/tests/golden/pr9-sample.json"
+        ))
+        .expect("PR #9 golden must be JSON");
+        assert_eq!(body, golden);
+    }
+
+    #[tokio::test]
+    async fn legacy_route_ignores_extra_fields_and_returns_json_400_for_missing_input() {
+        let fixture = fixture_request();
+        let request = serde_json::json!({
+            "offer": fixture["offer"],
+            "accept": fixture["accept"],
+            "network": "regtest",
+            "ignoredByPr9": true
+        });
+        let app = router_with_state(AppState::new(P256Pair::generate().unwrap()));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/verify")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::post("/api/verify")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"offer":""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error"], "Missing offer or accept hex");
+    }
+
+    #[tokio::test]
+    async fn policy_network_is_the_address_rendering_fallback() {
+        let fixture = fixture_request();
+        let request = serde_json::json!({
+            "offer": fixture["offer"],
+            "accept": fixture["accept"],
+            "policy": {"network": "regtest"}
+        });
+        let app = router_with_state(AppState::new(P256Pair::generate().unwrap()));
+        let response = app
+            .oneshot(
+                Request::post("/api/verify-policy")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["verification"]["network"], "regtest");
+        assert_eq!(body["checks"][0]["id"], "network");
+        assert_eq!(body["checks"][0]["status"], "pass");
     }
 
     #[tokio::test]
@@ -132,5 +212,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn malformed_transcript_gets_a_signed_negative_result() {
+        let app = router_with_state(AppState::new(P256Pair::generate().unwrap()));
+        let request = serde_json::json!({
+            "offer": "abc",
+            "accept": "00",
+            "challenge": "negative-result"
+        });
+        let response = app
+            .oneshot(
+                Request::post("/v1/verify")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["result"]["verification"]["verificationStatus"], "fail");
+        let proof: TurnkeyAppProof = serde_json::from_value(body["proof"].clone()).unwrap();
+        turnkey_proofs::verify_app_proof_signature(&proof)
+            .expect("negative result must remain authenticated");
     }
 }

@@ -17,12 +17,13 @@ qos_p256 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync"] }
 tower = { workspace = true, features = ["limit", "timeout"] }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 verifier-core = { path = "../verifier-core" }
+verifier-policy = { path = "../verifier-policy" }
 verifier-schema = { path = "../verifier-schema" }
 
 [dev-dependencies]

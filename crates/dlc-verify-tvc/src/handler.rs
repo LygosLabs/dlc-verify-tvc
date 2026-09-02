@@ -10,8 +10,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use verifier_schema::{
-    AppProof, Network, VerificationPolicy, VerificationRequest, VerificationResult,
-    VerifiedResponse,
+    AppProof, DlcPolicyVerificationResult, DlcVerificationPolicy, DlcVerifyResult, PolicyNetwork,
+    TvcVerificationRequest, VerifiedResponse,
 };
 
 const APP_PROOF_SCHEME: &str = "SIGNATURE_SCHEME_EPHEMERAL_KEY_P256";
@@ -24,7 +24,7 @@ struct ProofPayload<'a> {
     verifier_version: &'static str,
     request_digest: String,
     challenge: &'a str,
-    result: &'a VerificationResult,
+    result: &'a DlcPolicyVerificationResult,
 }
 
 #[derive(Serialize)]
@@ -32,47 +32,36 @@ struct ErrorBody {
     error: String,
 }
 
-/// Transitional input accepted by the TypeScript-compatible routes.
+/// Exact request accepted by DLC Verify's `/api/verify` endpoint.
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct LegacyVerificationRequest {
     #[serde(alias = "offerHex")]
-    offer: String,
+    offer: Option<String>,
     #[serde(alias = "acceptHex")]
-    accept: String,
+    accept: Option<String>,
     #[serde(default)]
     sign_hex: Option<String>,
     #[serde(default)]
     expected_oracle_pubkey: Option<String>,
     #[serde(default)]
-    network: Option<Network>,
-    #[serde(default)]
-    policy: Option<VerificationPolicy>,
-    #[serde(default)]
-    challenge: Option<String>,
+    network: Option<String>,
 }
 
-impl LegacyVerificationRequest {
-    fn into_request(self) -> VerificationRequest {
-        let mut policy = self.policy.unwrap_or_default();
-        if policy.expected_oracle_pubkey.is_none() {
-            policy.expected_oracle_pubkey = self.expected_oracle_pubkey;
-        }
-        if policy.network.is_none() {
-            policy.network = self.network;
-        }
-        let has_policy = policy.network.is_some()
-            || policy.expected_oracle_pubkey.is_some()
-            || policy.expected_total_collateral_sats.is_some()
-            || policy.oracle_event.is_some();
-        VerificationRequest {
-            offer: self.offer,
-            accept: self.accept,
-            sign: self.sign_hex,
-            policy: has_policy.then_some(policy),
-            challenge: self.challenge,
-        }
-    }
+/// Exact request accepted by DLC Verify PR #9's `/api/verify-policy` endpoint.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LegacyPolicyVerificationRequest {
+    #[serde(alias = "offerHex")]
+    offer: Option<String>,
+    #[serde(alias = "acceptHex")]
+    accept: Option<String>,
+    #[serde(default)]
+    sign_hex: Option<String>,
+    #[serde(default)]
+    network: Option<String>,
+    #[serde(default)]
+    policy: Option<DlcVerificationPolicy>,
 }
 
 pub(crate) async fn health() -> Json<serde_json::Value> {
@@ -84,40 +73,75 @@ pub(crate) async fn version() -> Json<serde_json::Value> {
         "name": "dlc-verify-tvc",
         "version": env!("CARGO_PKG_VERSION"),
         "schemaVersion": "lygos.dlc-verification.v1",
+        "compatibilityTarget": "LygosLabs/dlc-verify#9@e46703e7adf21ce407e150d4f46ff455ba46fd57",
+        "ddkVersion": "1.1.2",
         "egressRequired": false
     }))
 }
 
 pub(crate) async fn verify(
     State(state): State<AppState>,
-    Json(request): Json<VerificationRequest>,
+    Json(request): Json<TvcVerificationRequest>,
 ) -> Result<Json<VerifiedResponse>, Response> {
     verify_and_prove(state, request).await.map(Json)
 }
 
 pub(crate) async fn verify_legacy(
+    State(state): State<AppState>,
     Json(request): Json<LegacyVerificationRequest>,
-) -> Result<Json<VerificationResult>, Response> {
-    let request = request.into_request();
-    let result = tokio::task::spawn_blocking(move || verifier_core::verify(&request))
-        .await
-        .map_err(|error| internal_error(format!("verifier task failed: {error}")))?
-        .map_err(bad_request)?;
-    Ok(Json(result))
+) -> Result<Json<DlcVerifyResult>, Response> {
+    let offer = required_legacy_field(request.offer, "Missing offer or accept hex")
+        .map_err(bad_request_message)?;
+    let accept = required_legacy_field(request.accept, "Missing offer or accept hex")
+        .map_err(bad_request_message)?;
+    Ok(Json(
+        run_verifier(
+            &state,
+            offer,
+            accept,
+            request.sign_hex,
+            request.expected_oracle_pubkey,
+            request.network,
+        )
+        .await,
+    ))
 }
 
 pub(crate) async fn verify_policy_legacy(
     State(state): State<AppState>,
-    Json(request): Json<LegacyVerificationRequest>,
-) -> Result<Json<VerifiedResponse>, Response> {
-    verify_and_prove(state, request.into_request())
-        .await
-        .map(Json)
+    Json(request): Json<LegacyPolicyVerificationRequest>,
+) -> Result<Json<DlcPolicyVerificationResult>, Response> {
+    let offer = required_legacy_field(request.offer, "Missing required fields: offer, accept")
+        .map_err(bad_request_message)?;
+    let accept = required_legacy_field(request.accept, "Missing required fields: offer, accept")
+        .map_err(bad_request_message)?;
+    let network = request.network.or_else(|| {
+        request
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.network)
+            .map(policy_network_name)
+            .map(str::to_owned)
+    });
+    run_policy_verifier(
+        &state,
+        offer,
+        accept,
+        request.sign_hex,
+        request
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.expected_oracle_pubkey.clone()),
+        network,
+        request.policy,
+    )
+    .await
+    .map(Json)
 }
 
 async fn verify_and_prove(
     state: AppState,
-    request: VerificationRequest,
+    request: TvcVerificationRequest,
 ) -> Result<VerifiedResponse, Response> {
     let challenge = request
         .challenge
@@ -128,10 +152,32 @@ async fn verify_and_prove(
         .to_owned();
     let request_bytes = qos_json::to_vec(&request).map_err(internal_serialization_error)?;
     let request_digest = format!("{:x}", Sha256::digest(&request_bytes));
-    let result = tokio::task::spawn_blocking(move || verifier_core::verify(&request))
-        .await
-        .map_err(|error| internal_error(format!("verifier task failed: {error}")))?
-        .map_err(bad_request)?;
+    let network = request
+        .network
+        .map(policy_network_name)
+        .map(str::to_owned)
+        .or_else(|| {
+            request
+                .policy
+                .as_ref()
+                .and_then(|policy| policy.network)
+                .map(policy_network_name)
+                .map(str::to_owned)
+        });
+    let expected_oracle_pubkey = request
+        .policy
+        .as_ref()
+        .and_then(|policy| policy.expected_oracle_pubkey.clone());
+    let result = run_policy_verifier(
+        &state,
+        request.offer,
+        request.accept,
+        request.sign_hex,
+        expected_oracle_pubkey,
+        network,
+        request.policy,
+    )
+    .await?;
 
     let proof_payload = ProofPayload {
         proof_type: "APP_PROOF_TYPE_LYGOS_DLC_VERIFICATION",
@@ -161,8 +207,81 @@ async fn verify_and_prove(
     })
 }
 
-fn bad_request(error: verifier_core::VerifyError) -> Response {
-    bad_request_message(error.to_string())
+async fn run_verifier(
+    state: &AppState,
+    offer: String,
+    accept: String,
+    sign_hex: Option<String>,
+    expected_oracle_pubkey: Option<String>,
+    network: Option<String>,
+) -> DlcVerifyResult {
+    let permit = match state.verifier_permits.clone().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(error) => return task_failure(format!("verifier capacity is unavailable: {error}")),
+    };
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        verifier_core::verify_dlc_compatibility(
+            &offer,
+            &accept,
+            sign_hex.as_deref(),
+            expected_oracle_pubkey.as_deref(),
+            network.as_deref(),
+        )
+    })
+    .await
+    .unwrap_or_else(|error| task_failure(format!("verifier task failed: {error}")))
+}
+
+async fn run_policy_verifier(
+    state: &AppState,
+    offer: String,
+    accept: String,
+    sign_hex: Option<String>,
+    expected_oracle_pubkey: Option<String>,
+    network: Option<String>,
+    policy: Option<DlcVerificationPolicy>,
+) -> Result<DlcPolicyVerificationResult, Response> {
+    let permit = state
+        .verifier_permits
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| internal_error(format!("verifier capacity is unavailable: {error}")))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let verification = verifier_core::verify_dlc_compatibility(
+            &offer,
+            &accept,
+            sign_hex.as_deref(),
+            expected_oracle_pubkey.as_deref(),
+            network.as_deref(),
+        );
+        verifier_policy::evaluate_dlc_policy(&verification, policy.as_ref())
+    })
+    .await
+    .map_err(|error| internal_error(format!("verifier task failed: {error}")))?
+    .map_err(|error| internal_error(format!("policy evaluation failed: {error}")))
+}
+
+fn task_failure(error: String) -> DlcVerifyResult {
+    let mut result = DlcVerifyResult {
+        verification_status: verifier_schema::VerificationStatus::Fail,
+        ..DlcVerifyResult::default()
+    };
+    result
+        .verification_failures
+        .push("verifier-task-failed".to_owned());
+    result.error = Some(error);
+    result
+}
+
+fn policy_network_name(network: PolicyNetwork) -> &'static str {
+    match network {
+        PolicyNetwork::Mainnet => "mainnet",
+        PolicyNetwork::Testnet => "testnet",
+        PolicyNetwork::Regtest => "regtest",
+    }
 }
 
 fn bad_request_message(message: impl Into<String>) -> Response {
@@ -173,6 +292,13 @@ fn bad_request_message(message: impl Into<String>) -> Response {
         }),
     )
         .into_response()
+}
+
+fn required_legacy_field(
+    value: Option<String>,
+    message: &'static str,
+) -> Result<String, &'static str> {
+    value.filter(|field| !field.is_empty()).ok_or(message)
 }
 
 fn internal_serialization_error(error: serde_json::Error) -> Response {
