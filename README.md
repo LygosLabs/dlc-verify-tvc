@@ -2,7 +2,7 @@
 
 Rust implementation of Lygos DLC Verify designed to run as a deterministic application inside a Turnkey Verifiable Cloud enclave.
 
-The current v0.2 code is the TVC-compatible foundation. It strictly parses real DDK Offer/Accept/Sign messages, validates core structure and oracle announcements, evaluates the initial policy subset, and signs the result with the enclave's QOS-managed ephemeral key. It deliberately reports `incomplete` while transaction reconstruction and full adaptor/refund/funding signature verification are being implemented. See [PARITY.md](PARITY.md).
+The current v0.2 code is the TVC-compatible foundation. It strictly parses real DDK Offer/Accept/Sign messages, validates core structure and oracle announcements, evaluates the initial policy subset, and signs the result with the enclave's QOS-managed ephemeral key. It deliberately reports `incomplete` while transaction reconstruction and full adaptor/refund/funding signature verification are being implemented. See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the committed execution plan and [PARITY.md](PARITY.md) for the current parity ledger.
 
 ## Endpoints
 
