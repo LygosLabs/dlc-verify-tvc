@@ -1,0 +1,23 @@
+[package]
+name = "verifier-core"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bitcoin = { workspace = true }
+ddk-dlc = { workspace = true }
+ddk-messages = { workspace = true }
+hex = { workspace = true }
+lightning = { workspace = true }
+secp256k1-zkp = { workspace = true }
+sha2 = { workspace = true }
+verifier-schema = { path = "../verifier-schema" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true }

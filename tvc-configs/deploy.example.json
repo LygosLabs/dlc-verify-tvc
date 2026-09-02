@@ -1,0 +1,12 @@
+{
+  "appId": "REPLACE_WITH_TVC_APP_ID",
+  "qosVersion": "0.12.1",
+  "pivotContainerImageUrl": "ghcr.io/lygoslabs/dlc-verify-tvc@sha256:REPLACE_WITH_OCI_DIGEST",
+  "pivotPath": "/tvc_app",
+  "pivotArgs": ["--host", "0.0.0.0", "--port", "3000"],
+  "expectedPivotDigest": "REPLACE_WITH_TVC_APP_ELF_SHA256",
+  "dangerousDeployDebugMode": false,
+  "healthCheckType": "TVC_HEALTH_CHECK_TYPE_HTTP",
+  "healthCheckPort": 3000,
+  "publicIngressPort": 3000
+}

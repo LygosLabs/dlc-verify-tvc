@@ -1,92 +1,51 @@
-# TVC App Template
+# Lygos DLC Verify for Turnkey Verifiable Cloud
 
-A starter template for building [Turnkey Verifiable Cloud (TVC)](https://docs.turnkey.com) enclave applications.
+Rust implementation of Lygos DLC Verify designed to run as a deterministic application inside a Turnkey Verifiable Cloud enclave.
 
-This is a minimal REST server that demonstrates the structure and patterns for running an application inside a TVC enclave.
+The current v0.2 code is the TVC-compatible foundation. It strictly parses real DDK Offer/Accept/Sign messages, validates core structure and oracle announcements, evaluates the initial policy subset, and signs the result with the enclave's QOS-managed ephemeral key. It deliberately reports `incomplete` while transaction reconstruction and full adaptor/refund/funding signature verification are being implemented. See [PARITY.md](PARITY.md).
 
 ## Endpoints
 
-```sh
-$ curl localhost:44020/health
-{"status":"healthy"}
+- `GET /health` — TVC health check.
+- `GET /version` — service/schema version and egress declaration.
+- `POST /v1/verify` — canonical request and standard Turnkey App Proof response.
+- `POST /api/verify` — transitional TypeScript-style input and unsigned bare result.
+- `POST /api/verify-policy` — transitional TypeScript-style input with App Proof; its result schema is not yet PR #9-compatible.
+- `GET /metrics` — request metadata only; raw DLC messages and loan terms are never logged.
 
-$ curl localhost:44020/hello_world
-{"message":"hello world"}
+The canonical body is:
 
-$ curl localhost:44020/time
-{"time":1741048558}
-
-$ curl localhost:44020/random_app_proof
-{"random_number":"12345","proof":{"public_key":"...","payload":"{\"random_number\":\"12345\"}","signature":"..."}}
-
-$ curl -X POST \
-  -H 'content-type: application/json' \
-  -d '{"plaintext":"hello TVC world"}' \
-  localhost:44020/quorum_key/encrypt
-{"ciphertext":"..."}
-
-$ curl -X POST \
-  -H 'content-type: application/json' \
-  -d '{"ciphertext":"..."}' \
-  localhost:44020/quorum_key/decrypt
-{"plaintext":"hello TVC world"}
-
-$ curl -X POST -d 'hello' localhost:44020/echo
-hello
-
-$ curl localhost:44020/btc_price
-{"bitcoin_usd":64225.0}
-
-$ curl localhost:44020/metrics
-# HELP tvc_http_request_duration_ms HTTP request duration in milliseconds
-# TYPE tvc_http_request_duration_ms histogram
-tvc_http_request_duration_ms_bucket{method="GET",path="/health",status="200",le="1"} 1
-...
+```json
+{
+  "offer": "hex",
+  "accept": "hex",
+  "sign": "optional hex",
+  "policy": {
+    "network": "testnet4",
+    "expectedOraclePubkey": "hex",
+    "expectedTotalCollateralSats": "20000",
+    "oracleEvent": { "expectedEventId": "repaid-..." }
+  },
+  "challenge": "required caller-generated unique value"
+}
 ```
+
+The response proof uses Turnkey's standard fields: `scheme`, `publicKey`, `proofPayload`, and `signature`. Consumers must verify the App Proof and its Boot Proof, compare the enclave manifest and executable digest to a separately trusted Lygos release, check the request digest and challenge, and act only on the result inside `proofPayload`.
 
 ## Development
 
-### Run tests
-
-```
+```sh
 make test
-```
-
-### Run locally
-
-```
+make lint
 make run
 ```
 
-Server starts on http://127.0.0.1:44020
+Local and TVC runtime defaults are `0.0.0.0:3000`. Each decoded DLC message is limited to 1 MiB and the containing JSON request to 7 MiB; verification concurrency is capped at eight requests and request execution at 30 seconds. The CPU-bound verifier runs on Tokio's blocking pool. Proof-bearing endpoints reject a missing or empty challenge to prevent unintentional replay.
 
-## Building OCI containers
-
-This repository uses [StageX](https://stagex.tools) to build OCI containers. Requires Docker >= 26 with containerd:
-
-- **Docker Desktop:** Dashboard > Settings > "Use containerd for pulling and storing images"
-- **Linux:** add to `/etc/docker/daemon.json`:
-  ```json
-  {
-    "features": {
-      "containerd-snapshotter": true
-    }
-  }
-  ```
-
-Build the container:
+Build the StageX image:
 
 ```sh
-make out/helloworld/index.json
+make out/dlc-verify-tvc/index.json
 ```
 
-## Project Structure
-
-```
-crates/
-  helloworld/     # REST server binary
-  metrics/        # Prometheus metrics Tower middleware
-  e2e/            # End-to-end tests
-images/
-  helloworld/     # Containerfile for OCI image
-```
+The deterministic static binary is placed at `/tvc_app`. Start from `tvc-configs/*.example.json`, replace every placeholder, and deploy only an immutable GHCR digest. The initial application must retain `enableEgress: false`.

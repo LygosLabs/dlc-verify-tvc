@@ -1,8 +1,7 @@
-HOST ?= 127.0.0.1
-PORT ?= 44020
-LOCAL_ENCLAVE_DIR ?= /tmp/tvc-template-local-enclave
+HOST ?= 0.0.0.0
+PORT ?= 3000
+LOCAL_ENCLAVE_DIR ?= /tmp/dlc-verify-tvc-local-enclave
 EPHEMERAL_FILE ?= $(LOCAL_ENCLAVE_DIR)/qos.ephemeral.key
-QUORUM_FILE ?= $(LOCAL_ENCLAVE_DIR)/qos.quorum.key
 
 .PHONY: all
 all: build
@@ -29,19 +28,17 @@ lint:
 local-keys:
 	mkdir -p $(LOCAL_ENCLAVE_DIR)
 	test -f $(EPHEMERAL_FILE) || openssl rand -hex 32 > $(EPHEMERAL_FILE)
-	test -f $(QUORUM_FILE) || openssl rand -hex 32 > $(QUORUM_FILE)
 
 .PHONY: run
 run: local-keys
-	cargo run --bin helloworld -- \
+	cargo run --bin dlc-verify-tvc -- \
 	--host $(HOST) \
 	--port $(PORT) \
-	--ephemeral-file $(EPHEMERAL_FILE) \
-	--quorum-file $(QUORUM_FILE)
+	--ephemeral-file $(EPHEMERAL_FILE)
 
-out/helloworld/index.json: \
-	Cargo.lock Cargo.toml rust-toolchain.toml $(shell find images/helloworld crates -type f ! -path '*/target/*')
-	$(call build,helloworld)
+out/dlc-verify-tvc/index.json: \
+	Cargo.lock Cargo.toml rust-toolchain.toml $(shell find images/dlc-verify-tvc crates -type f ! -path '*/target/*')
+	$(call build,dlc-verify-tvc)
 
 define build_context
 $$( \
@@ -59,7 +56,7 @@ endef
 define build
 	$(eval NAME := $(1))
 	$(eval TYPE := $(if $(2),$(2),dir))
-	$(eval REGISTRY := tkhq-tvc-helloworld)
+	$(eval REGISTRY := lygoslabs-dlc-verify-tvc)
 	$(eval PLATFORM := linux/amd64)
 	DOCKER_BUILDKIT=1 \
 	SOURCE_DATE_EPOCH=1 \
@@ -69,7 +66,7 @@ define build
 		--tag $(REGISTRY)/$(NAME) \
 		--progress=plain \
 		--platform=$(PLATFORM) \
-		--label "org.opencontainers.image.source=https://github.com/tkhq/tvc-helloworld" \
+		--label "org.opencontainers.image.source=https://github.com/LygosLabs/dlc-verify-tvc" \
 		$(if $(filter common,$(NAME)),,$(call build_context,$(1))) \
 		$(if $(filter 1,$(NOCACHE)),--no-cache) \
 		--output "\

@@ -97,10 +97,10 @@ impl Builder {
 
     /// Execute `test`.
     ///
-    /// Spawns the `helloworld` binary, waits for it to bind, then runs
+    /// Spawns the `dlc-verify-tvc` binary, waits for it to bind, then runs
     /// the provided test function with a [`TestArgs`] containing the base URL.
     ///
-    /// Note this test env builder relies on the `helloworld` binary already
+    /// Note this test env builder relies on the verifier binary already
     /// being built and existing in the target directory. Run `cargo build`
     /// from the workspace root before running integration tests.
     ///
@@ -115,18 +115,13 @@ impl Builder {
         let host_port =
             find_free_port().expect("failed to find a free port after maximum search attempts");
 
-        let server_binary = assert_cmd::cargo::cargo_bin("helloworld");
+        let server_binary = assert_cmd::cargo::cargo_bin("dlc-verify-tvc");
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
         let ephemeral_key_path = temp_dir.path().join("qos.ephemeral.key");
-        let quorum_key_path = temp_dir.path().join("qos.quorum.key");
         P256Pair::generate()
             .expect("failed to generate ephemeral key")
             .to_hex_file(&ephemeral_key_path)
             .expect("failed to write ephemeral key");
-        P256Pair::generate()
-            .expect("failed to generate quorum key")
-            .to_hex_file(&quorum_key_path)
-            .expect("failed to write quorum key");
 
         let _server_process: ChildWrapper = Command::new(server_binary)
             .arg("--host")
@@ -135,10 +130,8 @@ impl Builder {
             .arg(host_port.to_string())
             .arg("--ephemeral-file")
             .arg(&ephemeral_key_path)
-            .arg("--quorum-file")
-            .arg(&quorum_key_path)
             .spawn()
-            .expect("failed to spawn helloworld binary")
+            .expect("failed to spawn verifier binary")
             .into();
 
         wait_until_port_is_bound(host_port);

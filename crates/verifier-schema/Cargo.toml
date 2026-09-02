@@ -1,0 +1,12 @@
+[package]
+name = "verifier-schema"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive", "std"] }
+
+[lints]
+workspace = true
