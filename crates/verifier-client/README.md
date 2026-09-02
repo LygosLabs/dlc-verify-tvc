@@ -30,24 +30,50 @@ rejects client bridges and DNS, and then returns the named
 of a client bridge or DNS entry is not misrepresented as proof that Turnkey's
 separate application-level egress control is disabled.
 
-## Integration gate
+## Live verification
 
 Unit tests exercise policy validation, invocation replay protection, exact
 App/Boot ephemeral-key matching, and prove malformed matching artifacts reach
-the official Turnkey verifier. They do not positively establish complete Boot
-Proof interoperability: a checked-in real Boot Proof fixture is not available
-yet, so there is intentionally no mocked "successful attestation" test.
+the official Turnkey verifier. A real deployed release can be checked with the
+`verify-live` binary:
 
-M3 requires a real Boot Proof captured by the exact App Proof public key from a
-non-debug, egress-disabled TVC canary. Add that immutable fixture and its
-trusted release policy, then test:
+```sh
+cargo build --locked -p verifier-client --bin verify-live
 
-1. the official verifier accepts the App/Boot pair offline;
-2. every proof-bound policy field passes;
-3. one mutation per pinned field fails; and
-4. Turnkey supplies proof-bound evidence for `pivotPath` and `enableEgress`, or
-   the published threat model explicitly removes those values from the
-   authorization claim for a documented cryptographic reason.
+TVC_ORG_ID=<organization-id> \
+TVC_API_KEY_PUBLIC=<api-public-key> \
+TVC_API_KEY_PRIVATE="$(your-secret-reader)" \
+target/debug/verify-live \
+  .tvc-evidence/request.json \
+  .tvc-evidence/response.json \
+  release/trusted-release-policy.json \
+  release/release-manifest.json \
+  .tvc-evidence/boot-proof.json
+```
+
+The command recomputes the canonical request digest, fetches the Boot Proof for
+the exact App Proof ephemeral key, verifies the official Turnkey proof chain,
+compares every proof-bound field with the trusted release policy, and queries
+the authenticated control plane to compare the live app, deployment, image,
+manifest IDs, QOS version, pivot configuration, health/ingress ports, egress,
+and debug settings with the supplied release manifest. It also confirms that
+strict offline verification fails with exactly the currently unsupported
+proof-bound controls.
+
+Build the binary before placing credentials in its environment so Cargo and
+dependency build scripts never inherit them. Use a dedicated, least-privilege
+read credential where Turnkey permissions allow, load its private material from
+a secret store instead of command-line text, and clear it from the process
+environment after the check. The ignored `.tvc-evidence/` directory is the
+default location for live requests, responses, and Boot Proofs; do not commit
+those artifacts when they contain confidential DLC or deployment material.
+
+The optional Boot Proof output uses create-new semantics, mode `0600`, and is
+written only after every proof and control-plane check passes. Remove or rename
+an existing output before deliberately capturing a newer proof.
 
 Do not use `verify_proof_bound_offline` alone to authorize funding, minting, or
-settlement while the strict evidence error remains.
+settlement while `pivotPath` and `enableEgress` remain outside the
+cryptographically bound proof evidence. An authenticated control-plane query is
+useful operational corroboration, but it does not turn those fields into
+authorization-grade evidence.

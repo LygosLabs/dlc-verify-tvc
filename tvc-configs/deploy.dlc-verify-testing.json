@@ -1,0 +1,12 @@
+{
+  "appId": "bd66858d-2584-4e34-ae43-564de32aeccb",
+  "qosVersion": "0.12.1",
+  "pivotContainerImageUrl": "ghcr.io/lygoslabs/dlc-verify-tvc:sha-f54775ef6b7ab589d91e6e94b965ec0bc6a36364@sha256:56cd50a4ea66023ada531e0af653c1106fd8aacdbac918bbb1a72455c007b3dc",
+  "pivotPath": "/tvc_app",
+  "pivotArgs": ["--host", "0.0.0.0", "--port", "3000"],
+  "expectedPivotDigest": "2a74e61634ebf0d0c2b681735867acb1c1da6d26530c0768183badea7c603d16",
+  "dangerousDeployDebugMode": false,
+  "healthCheckType": "TVC_HEALTH_CHECK_TYPE_HTTP",
+  "healthCheckPort": 3000,
+  "publicIngressPort": 3000
+}

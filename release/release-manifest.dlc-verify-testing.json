@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "lygos.dlc-verify-tvc.release.v1",
+  "sourceCommit": "f54775ef6b7ab589d91e6e94b965ec0bc6a36364",
+  "compatibilityTarget": "LygosLabs/dlc-verify#9@e46703e7adf21ce407e150d4f46ff455ba46fd57",
+  "cargoLockSha256": "599d6d4acc79ea55555be2753010b82558eb470a9d7b840bbfe45ca327de4fd8",
+  "containerImage": "ghcr.io/lygoslabs/dlc-verify-tvc:sha-f54775ef6b7ab589d91e6e94b965ec0bc6a36364@sha256:56cd50a4ea66023ada531e0af653c1106fd8aacdbac918bbb1a72455c007b3dc",
+  "executablePath": "/tvc_app",
+  "executableSha256": "2a74e61634ebf0d0c2b681735867acb1c1da6d26530c0768183badea7c603d16",
+  "platform": "linux/amd64",
+  "qosVersion": "0.12.1",
+  "pivotArgs": ["--host", "0.0.0.0", "--port", "3000"],
+  "healthCheckPort": 3000,
+  "publicIngressPort": 3000,
+  "healthCheckType": "TVC_HEALTH_CHECK_TYPE_HTTP",
+  "hasPullSecret": false,
+  "dangerousDeployDebugMode": false,
+  "dangerousEnableDebugModeDeployments": false,
+  "enableEgress": false,
+  "qosCommitProvenanceAvailable": false,
+  "deploymentIdentity": {
+    "appId": "bd66858d-2584-4e34-ae43-564de32aeccb",
+    "deploymentId": "89b94e75-0c29-4d51-aaba-e6b19c678a81",
+    "deploymentLabel": "deploy-89b94e75-0c29-4d51-aaba-e6b19c678a81",
+    "manifestSetId": "f8e0cf6d-5e27-41fa-adbc-040bcf748f95",
+    "manifestId": "6fe6b823-6e40-49ec-bc5b-1d6f372b7b71",
+    "manifestHash": "1e33e6c1dc4a6a59fb5bb3315e9a7f61af6de55291559ec415f844c774969e1c",
+    "qosManifestVersion": "v2",
+    "qosCommit": "",
+    "pcrs": {
+      "pcr0": "a16c37b49023089be139b667cf87a32c796a9ccacacf9f0c87bf1a2f58546f2b46218ee6c0a17885f8a7d1b8cccff078",
+      "pcr1": "a16c37b49023089be139b667cf87a32c796a9ccacacf9f0c87bf1a2f58546f2b46218ee6c0a17885f8a7d1b8cccff078",
+      "pcr2": "21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a",
+      "pcr3": "321c3cd57bd9dc5549f349c315b93167fca1adbaf19fbb9c548101bae757970fe269e530ba684826e2f5fb043319a20f"
+    },
+    "manifestOperators": {
+      "threshold": 1,
+      "members": [
+        "0471010ad45422fe3ce5bd17f8c0c3ea76539590cd7be873f093f5dafd164e8f8cf0deadd8df439a43d61ea3449835d3e13c3a9261e31238ba4b4dac8aa5b1296e041f6942f5963f5bdafb1d3033fe74d601c424ff1ebab252ea05ff277f23b8a630917ae3e6231f11954fc79a6db04a494cd591620e84c7441668efc8c3bbdb17b8"
+      ]
+    }
+  },
+  "authorizationReady": false
+}

@@ -3806,10 +3806,15 @@ dependencies = [
  "base64 0.22.1",
  "qos_core",
  "qos_hex",
+ "qos_json",
  "serde",
  "serde_json",
+ "sha2",
+ "tokio",
+ "turnkey_api_key_stamper",
  "turnkey_client",
  "turnkey_proofs",
+ "verifier-schema",
 ]
 
 [[package]]

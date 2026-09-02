@@ -63,6 +63,8 @@ make out/dlc-verify-tvc/index.json
 
 Build and test commands use `Cargo.lock`. Local and TVC runtime defaults are `0.0.0.0:3000`. Each decoded DLC message is limited to 1 MiB, policy outcome expectations to 4,096, and the JSON body to 7 MiB. At most eight CPU-heavy jobs can continue at once—even after a request timeout—because the blocking jobs themselves retain the permits. HTTP requests time out after 30 seconds.
 
-The StageX build produces one static `linux/amd64` ELF at `/tvc_app`, with dependency fetching separated from a network-disabled release build. Start from `tvc-configs/*.example.json`, replace every placeholder, and deploy only an immutable GHCR digest. Production requires debug disabled, egress disabled, and a 2-of-3 Lygos-controlled manifest set. No repository artifact claims a deployment is live.
+The StageX build produces one static `linux/amd64` ELF at `/tvc_app`, with dependency fetching separated from a network-disabled release build. Start from `tvc-configs/*.example.json`, replace every placeholder, and deploy only an immutable GHCR digest. Production requires debug disabled, egress disabled, and a 2-of-3 Lygos-controlled manifest set. Named testing release artifacts may record an observed live deployment, but remain explicitly non-authorization-ready.
 
 Release identity templates live under `release/`. A production release is not authorization-ready until the live TVC canary supplies an exact-key Boot Proof and the independently trusted release/deployment controls pass.
+
+An empty `qosCommit` records the value actually committed by the current QOS manifest; it does not establish QOS source-commit provenance. Release artifacts must set `qosCommitProvenanceAvailable` accordingly and rely on the pinned PCRs and manifest hash for the evidence QOS actually provides.

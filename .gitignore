@@ -3,3 +3,7 @@ out
 target
 *.log
 local-enclave
+.tvc-evidence/
+.env
+.env.*
+!.env.example
