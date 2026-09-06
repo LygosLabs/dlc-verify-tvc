@@ -68,3 +68,16 @@ The StageX build produces one static `linux/amd64` ELF at `/tvc_app`, with depen
 Release identity templates live under `release/`. A production release is not authorization-ready until the live TVC canary supplies an exact-key Boot Proof and the independently trusted release/deployment controls pass.
 
 An empty `qosCommit` records the value actually committed by the current QOS manifest; it does not establish QOS source-commit provenance. Release artifacts must set `qosCommitProvenanceAvailable` accordingly and rely on the pinned PCRs and manifest hash for the evidence QOS actually provides.
+
+## Refund mode compatibility
+
+The verifier accepts contract flags `0x00` (refund each party its collateral) and
+`0x01` (DDK refund-to-accepter). Unknown bits remain rejected. The original signed
+flag is passed to DDK 1.1.2 transaction reconstruction, and both refund signatures
+are verified against that transaction. The existing refund-pays-lender policy is
+unchanged: supporting a flag does not approve a lender role or a loan policy.
+
+`cargo test --locked -p verifier-core --test refund_to_accepter` exercises both
+modes using fresh synthetic signatures and deliberately public test keys. No
+private transcripts are included. The frozen TypeScript goldens remain the
+flag-zero compatibility target; this extension does not claim TypeScript flag-one parity.

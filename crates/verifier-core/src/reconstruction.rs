@@ -28,7 +28,8 @@ const MAX_WITNESS_ELEMENT_BYTES: usize = 16_384;
 const REGULAR_SPLICE_WITNESS_LEN: u16 = 108;
 const DLC_SPLICE_WITNESS_LEN: u16 = 220;
 const SUPPORTED_PROTOCOL_VERSION: u32 = 1;
-const SUPPORTED_CONTRACT_FLAGS: u8 = 0;
+// DDK 1.1.2 reconstructs the signed refund mode; unknown bits stay unsupported.
+const SUPPORTED_CONTRACT_FLAGS: u8 = ddk_dlc::REFUND_TO_ACCEPTER_FLAG;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FundingInputFact {
@@ -229,7 +230,7 @@ fn validate_reconstruction_inputs(
             offer.protocol_version, accept.protocol_version
         ));
     }
-    if offer.contract_flags != SUPPORTED_CONTRACT_FLAGS {
+    if offer.contract_flags & !SUPPORTED_CONTRACT_FLAGS != 0 {
         return Err(format!(
             "unsupported contract flags: {}",
             offer.contract_flags
