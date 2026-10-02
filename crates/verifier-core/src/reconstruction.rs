@@ -875,13 +875,13 @@ pub(crate) fn reconstruct_and_verify(
         );
         Ok::<_, String>((reconstruction, checks))
     };
-    let current = attempt(FeeRule::CounterpartyPayout)?;
-    if current.1.accept_adaptor_valid {
-        return Ok(current);
+    let current = attempt(FeeRule::CounterpartyPayout);
+    if matches!(&current, Ok((_, checks)) if checks.accept_adaptor_valid) {
+        return current;
     }
     match attempt(FeeRule::OwnPayoutOnly) {
-        Ok(legacy) if legacy.1.accept_adaptor_valid => Ok(legacy),
-        _ => Ok(current),
+        Ok(legacy) if legacy.1.accept_adaptor_valid || current.is_err() => Ok(legacy),
+        _ => current,
     }
 }
 
