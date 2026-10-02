@@ -1,0 +1,28 @@
+{
+  "name": "lygos-mint-attester",
+  "quorumPublicKey": "REPLACE_WITH_MINT_ATTESTER_QUORUM_PUBLIC_KEY",
+  "enableEgress": false,
+  "manifestSetId": null,
+  "manifestSetParams": {
+    "name": "lygos-mint-attester-manifest-operators",
+    "threshold": 2,
+    "newOperators": [
+      {
+        "name": "REPLACE_WITH_LYGOS_OPERATOR_1_NAME",
+        "publicKey": "REPLACE_WITH_LYGOS_OPERATOR_1_PUBLIC_KEY"
+      },
+      {
+        "name": "REPLACE_WITH_LYGOS_OPERATOR_2_NAME",
+        "publicKey": "REPLACE_WITH_LYGOS_OPERATOR_2_PUBLIC_KEY"
+      },
+      {
+        "name": "REPLACE_WITH_LYGOS_OPERATOR_3_NAME",
+        "publicKey": "REPLACE_WITH_LYGOS_OPERATOR_3_PUBLIC_KEY"
+      }
+    ],
+    "existingOperatorIds": []
+  },
+  "shareSetId": null,
+  "shareSetParams": null,
+  "dangerousEnableDebugModeDeployments": false
+}

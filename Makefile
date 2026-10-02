@@ -40,6 +40,10 @@ out/dlc-verify-tvc/index.json: \
 	Cargo.lock Cargo.toml rust-toolchain.toml $(shell find images/dlc-verify-tvc crates -type f ! -path '*/target/*')
 	$(call build,dlc-verify-tvc)
 
+out/mint-attester/index.json: \
+	Cargo.lock Cargo.toml rust-toolchain.toml $(shell find images/mint-attester crates -type f ! -path '*/target/*')
+	$(call build,mint-attester)
+
 define build_context
 $$( \
 	mkdir -p out; \

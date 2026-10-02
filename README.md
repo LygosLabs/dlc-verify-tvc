@@ -68,3 +68,31 @@ The StageX build produces one static `linux/amd64` ELF at `/tvc_app`, with depen
 Release identity templates live under `release/`. A production release is not authorization-ready until the live TVC canary supplies an exact-key Boot Proof and the independently trusted release/deployment controls pass.
 
 An empty `qosCommit` records the value actually committed by the current QOS manifest; it does not establish QOS source-commit provenance. Release artifacts must set `qosCommitProvenanceAvailable` accordingly and rely on the pinned PCRs and manifest hash for the evidence QOS actually provides.
+
+## Mint attester
+
+`crates/mint-attester` is a second TVC application in this workspace. It checks a Midnight DLC and its Bitcoin lock by SPV, then signs the receipt that `lygos-contracts` `Verifier.sol` accepts. The signer is the signing half of the application's quorum key, so it must run as its own TVC app with a quorum key Lygos generates. The default Turnkey quorum key is shared and must not be used.
+
+- `GET /health` — liveness.
+- `POST /v1/attest` — DLC transcript, lock proof, and loan terms in; signed receipt out, or `422` with the reason for refusal.
+
+Everything the attester pins is a launch argument, so the QOS manifest measures it: `--network`, `--lygos-funding-pubkey`, `--oracle-pubkey`. Egress stays disabled; a relayer supplies the headers and Merkle proof.
+
+Build the image with `make out/mint-attester/index.json`. CI publishes it as `ghcr.io/lygoslabs/mint-attester` and prints the image digest and executable digest.
+
+Deployment, from `tvc-configs/*.mint-attester.example.json`:
+
+1. Generate the quorum key, split 2-of-3 to the YubiKey operators. Write both files outside the repository; the metadata file holds the encrypted shares.
+   ```bash
+   tvc keys init-local-quorum-key -o <dir>/quorum_key.json
+   tvc keys generate-local-quorum-key -c <dir>/quorum_key.json --quorum-key-metadata-out <dir>/quorum_key_metadata.json
+   ```
+2. Put the quorum public key and the three operator keys in the app config, then `tvc app create --config-file <app config>`.
+3. Put the app id, image digest, executable digest, and pinned keys in the deploy config, then `tvc deploy create --config-file <deploy config>`.
+4. Two operators approve the manifest: `tvc deploy approve`.
+5. Two operators provision the key. Each runs `tvc deploy provisioning-details`, `tvc keys re-encrypt-local-share`, and `tvc deploy post-share`.
+6. `tvc app set-live-deploy`, then check `/health` on the app's `publicDomain`.
+
+Steps 4 and 5 repeat for every new deployment, so an upgrade needs two operators present.
+
+The `Verifier` constructor takes the signing half of the quorum public key: the second 65-byte SEC1 point of the 130-byte key, as `signerX` and `signerY`.

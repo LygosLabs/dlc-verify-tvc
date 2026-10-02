@@ -74,7 +74,7 @@ pub(crate) async fn version() -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "schemaVersion": "lygos.dlc-verification.v1",
         "compatibilityTarget": "LygosLabs/dlc-verify#9@e46703e7adf21ce407e150d4f46ff455ba46fd57",
-        "ddkVersion": "1.1.2",
+        "ddkVersion": "2.0.0-rc.8",
         "egressRequired": false
     }))
 }
