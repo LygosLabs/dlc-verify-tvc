@@ -7,7 +7,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, FromRequest, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -334,11 +334,16 @@ pub fn router(config: Config) -> Router {
         .with_state(Arc::new(config))
 }
 
-async fn handle(State(config): State<Arc<Config>>, Json(request): Json<AttestRequest>) -> Response {
+async fn handle(State(config): State<Arc<Config>>, request: Request) -> Response {
     // ponytail: the permit rides inside the blocking task, so a request that times out keeps its
     // slot until the work actually ends; tower's ConcurrencyLimitLayer released it at the timeout.
+    // It is taken before the body is read, so a request waiting for a slot holds no buffer.
     let Ok(permit) = ATTEST_SLOTS.acquire().await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let request = match Json::<AttestRequest>::from_request(request, &()).await {
+        Ok(Json(request)) => request,
+        Err(rejection) => return rejection.into_response(),
     };
     // Request bodies and loan terms are never logged.
     match tokio::task::spawn_blocking(move || {
