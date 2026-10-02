@@ -108,7 +108,10 @@ fn is_address(value: &str) -> bool {
 ///
 /// Terms are canonical strings joined with `//`: decimal integers, lowercase `0x` hex for EVM
 /// values, lowercase hex for the compressed funding key, and liquidators joined with `,`.
+/// `announced_at` is in the preimage so the oracle's signature covers the receipt's
+/// `announcedAt`; nothing else the enclave checks binds it.
 #[must_use]
+#[allow(clippy::too_many_arguments)] // ponytail: mirrors the preimage order, one call site
 pub fn event_id(
     chain_id: u64,
     originator: &[u8; 20],
@@ -117,6 +120,7 @@ pub fn event_id(
     liquidators: &[&str],
     controller: &[u8; 20],
     mint_deadline: u64,
+    announced_at: u64,
 ) -> [u8; 32] {
     let preimage = [
         "lygos-midnight-v1",
@@ -127,6 +131,7 @@ pub fn event_id(
         &liquidators.join(","),
         &format!("0x{}", hex::encode(controller)),
         &mint_deadline.to_string(),
+        &announced_at.to_string(),
     ]
     .join("//");
     Sha256::digest(preimage.as_bytes()).into()
