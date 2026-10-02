@@ -76,7 +76,7 @@ An empty `qosCommit` records the value actually committed by the current QOS man
 - `GET /health` — liveness.
 - `POST /v1/attest` — DLC transcript, lock proof, and loan terms in; signed receipt out, or `422` with the reason for refusal.
 
-Everything the attester pins is a launch argument, so the QOS manifest measures it: `--network`, `--lygos-funding-pubkey`, `--oracle-pubkey`. Egress stays disabled; a relayer supplies the headers and Merkle proof.
+Everything the attester pins is a launch argument, so the QOS manifest measures it: `--network`, `--lygos-funding-pubkey`, `--oracle-pubkey`. Any network other than mainnet is refused unless `--allow-insecure-network` is also passed, because its proof of work is free to forge. Egress stays disabled; a relayer supplies the headers and Merkle proof.
 
 Build the image with `make out/mint-attester/index.json`. CI publishes it as `ghcr.io/lygoslabs/mint-attester` and prints the image digest and executable digest.
 

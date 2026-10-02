@@ -29,6 +29,9 @@ struct Cli {
     /// The Midnight oracle's x-only public key, hex.
     #[arg(long)]
     oracle_pubkey: XOnlyPublicKey,
+    /// Sign receipts on a network other than mainnet, whose proof of work is free to forge.
+    #[arg(long, default_value_t = false)]
+    allow_insecure_network: bool,
 }
 
 #[tokio::main]
@@ -47,6 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         lygos_funding_pubkey: cli.lygos_funding_pubkey.to_string(),
         oracle_pubkey: cli.oracle_pubkey.to_string(),
         key: quorum_key.signing_key().clone(),
+        allow_insecure_network: cli.allow_insecure_network,
     });
 
     let address = format!("{}:{}", cli.host, cli.port);

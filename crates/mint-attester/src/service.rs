@@ -33,6 +33,8 @@ pub struct Config {
     pub oracle_pubkey: String,
     /// The quorum signing key the `Verifier` contract trusts.
     pub key: SigningKey,
+    /// Sign receipts for a network whose proof of work is free to forge. Test deployments only.
+    pub allow_insecure_network: bool,
 }
 
 /// Body of `POST /v1/attest`. Hex throughout; EVM values may carry a `0x` prefix.
@@ -187,6 +189,9 @@ pub fn receipt_for(
             .join(" ")
         ));
     }
+    if config.network != Network::Bitcoin && !config.allow_insecure_network {
+        return Err("this network's proof of work is free to forge; pass --allow-insecure-network for a test deployment".to_owned());
+    }
     if &announcement.chain_hash != config.network.chain_hash().as_bytes() {
         return Err("the DLC is for another Bitcoin network".to_owned());
     }
@@ -221,6 +226,7 @@ pub fn receipt_for(
         &liquidators,
         &terms.controller,
         terms.mint_deadline,
+        terms.announced_at,
     );
     if announcement.event_id != format!("midnight-{}", hex::encode(event_id)) {
         return Err("the announcement's event id does not commit to these terms".to_owned());
@@ -385,6 +391,7 @@ mod tests {
             lygos_funding_pubkey: LYGOS.to_owned(),
             oracle_pubkey: String::new(),
             key: SigningKey::from_slice(&[7; 32]).expect("key"),
+            allow_insecure_network: false,
         }
     }
 
@@ -420,6 +427,7 @@ mod tests {
             &[&LIQUIDATOR["liquidated-by-".len()..]],
             &terms.controller,
             terms.mint_deadline,
+            terms.announced_at,
         );
         OfferAnnouncement {
             bytes: vec![9; 100],
@@ -519,6 +527,35 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_forged_announced_at() {
+        let mut terms = terms();
+        let announcement = announcement(&terms);
+        terms.announced_at += 1;
+        let error = receipt_for(&config(), &dlc(), &announcement, &lock(), &terms)
+            .expect_err("announcedAt is under the oracle's signature");
+        assert!(error.contains("event id"), "{error}");
+    }
+
+    #[test]
+    fn refuses_a_forgeable_network_unless_allowed() {
+        let terms = terms();
+        let regtest = Config {
+            network: Network::Regtest,
+            ..config()
+        };
+        let error = receipt_for(&regtest, &dlc(), &announcement(&terms), &lock(), &terms)
+            .expect_err("regtest proofs are free");
+        assert!(error.contains("--allow-insecure-network"), "{error}");
+        let allowed = Config {
+            allow_insecure_network: true,
+            ..regtest
+        };
+        let error = receipt_for(&allowed, &dlc(), &announcement(&terms), &lock(), &terms)
+            .expect_err("the fixture announcement is for mainnet");
+        assert!(error.contains("another Bitcoin network"), "{error}");
+    }
+
+    #[test]
     fn refuses_a_real_dlc_from_another_product() {
         let fixture: Value = serde_json::from_str(include_str!(
             "../../verifier-core/tests/fixtures/testnet-loan-118c9fc9.json"
@@ -542,6 +579,8 @@ mod tests {
         };
         assert!(attempt(&config).contains("network"));
         config.network = Network::Regtest;
+        assert!(attempt(&config).contains("--allow-insecure-network"));
+        config.allow_insecure_network = true;
         assert!(attempt(&config).contains("funding key"));
         // Even with its own key pinned, its refund and outcomes are not Midnight's.
         config.lygos_funding_pubkey = dlc.offerer_funding_pubkey.clone().expect("key");

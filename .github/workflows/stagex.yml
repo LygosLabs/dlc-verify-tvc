@@ -69,7 +69,7 @@ jobs:
             -p 127.0.0.1:3000:3000 \
             -v "${key_file}:/qos.quorum.key:ro" \
             "lygoslabs-dlc-verify-tvc/${{ matrix.target.name }}:latest" \
-            --network regtest \
+            --network regtest --allow-insecure-network \
             --lygos-funding-pubkey 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798 \
             --oracle-pubkey 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
           trap 'docker rm -f mint-attester-smoke >/dev/null 2>&1 || true' EXIT
