@@ -326,6 +326,8 @@ fn fixed<const N: usize>(field: &str, value: &str) -> Result<[u8; N], String> {
 
 /// Attestations in flight, timed-out ones included. `/health` is not subject to it.
 static ATTEST_SLOTS: Semaphore = Semaphore::const_new(8);
+/// How long a request may take to deliver its body once it holds a slot.
+const BODY_READ_LIMIT: Duration = Duration::from_secs(5);
 
 /// Build the attester's router.
 pub fn router(config: Config) -> Router {
@@ -343,13 +345,16 @@ pub fn router(config: Config) -> Router {
 async fn handle(State(config): State<Arc<Config>>, request: Request) -> Response {
     // ponytail: the permit rides inside the blocking task, so a request that times out keeps its
     // slot until the work actually ends; tower's ConcurrencyLimitLayer released it at the timeout.
-    // It is taken before the body is read, so a request waiting for a slot holds no buffer.
+    // It is taken before the body is read, so a request waiting for a slot holds no buffer, and
+    // the body read is capped so a stalled sender cannot sit on a slot for the whole 30s window.
     let Ok(permit) = ATTEST_SLOTS.acquire().await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let request = match Json::<AttestRequest>::from_request(request, &()).await {
-        Ok(Json(request)) => request,
-        Err(rejection) => return rejection.into_response(),
+    let body = Json::<AttestRequest>::from_request(request, &());
+    let request = match tokio::time::timeout(BODY_READ_LIMIT, body).await {
+        Ok(Ok(Json(request))) => request,
+        Ok(Err(rejection)) => return rejection.into_response(),
+        Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
     };
     // Request bodies and loan terms are never logged.
     match tokio::task::spawn_blocking(move || {
