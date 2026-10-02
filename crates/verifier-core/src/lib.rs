@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use bitcoin::{
     Amount, Network as BitcoinNetwork, blockdata::constants::genesis_block, hashes::Hash as _,
 };
+use ddk_dlc::FeeRule;
 use ddk_messages::{
     AcceptDlc, OfferDlc, SignDlc,
     contract_msgs::{ContractDescriptor, ContractInfo},
@@ -630,9 +631,14 @@ pub fn verify_dlc_compatibility(
         .sign_refund_valid
         .is_some_and(|valid| !valid)
         .then(|| "Offerer refund signature verification failed".to_owned());
+    // The TypeScript goldens pin the 1.x wording; only the DDK 2.0 fee rule is called out.
+    let fee_rule = match signatures.fee_rule {
+        FeeRule::OwnPayoutOnly => "",
+        FeeRule::CounterpartyPayout => ", DDK 2.0 counterparty-payout fee rule",
+    };
     result.adaptor_sig_verification_note = Some(if signatures.accept_adaptor_valid {
         format!(
-            "All {} CET adaptor signatures cryptographically valid (DDK)",
+            "All {} CET adaptor signatures cryptographically valid (DDK{fee_rule})",
             signatures.accept_adaptor_total_count
         )
     } else {

@@ -76,6 +76,8 @@ pub(crate) struct FundingWitnessChecks {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SignatureChecks {
+    /// The DDK fee rule the reported transactions were reconstructed under.
+    pub(crate) fee_rule: FeeRule,
     pub(crate) accept_adaptor_valid: bool,
     pub(crate) accept_adaptor_valid_count: usize,
     pub(crate) accept_adaptor_total_count: usize,
@@ -865,7 +867,7 @@ pub(crate) fn reconstruct_and_verify(
 ) -> Result<(Reconstruction, SignatureChecks), String> {
     let attempt = |fee_rule| {
         let reconstruction = reconstruct(offer, accept, descriptor, rendering_network, fee_rule)?;
-        let checks = verify_signatures(
+        let mut checks = verify_signatures(
             offer,
             accept,
             sign,
@@ -873,6 +875,7 @@ pub(crate) fn reconstruct_and_verify(
             announcement,
             &reconstruction,
         );
+        checks.fee_rule = fee_rule;
         Ok::<_, String>((reconstruction, checks))
     };
     let current = attempt(FeeRule::CounterpartyPayout);
@@ -947,6 +950,7 @@ fn verify_signatures(
     }
 
     SignatureChecks {
+        fee_rule: FeeRule::default(),
         accept_adaptor_valid,
         accept_adaptor_valid_count,
         accept_adaptor_total_count,

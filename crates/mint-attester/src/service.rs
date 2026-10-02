@@ -17,7 +17,7 @@ use p256::ecdsa::SigningKey;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
-use tower::limit::ConcurrencyLimitLayer;
+use tokio::sync::Semaphore;
 use tower_http::timeout::TimeoutLayer;
 use verifier_core::{OfferAnnouncement, offer_announcement, verify_dlc_compatibility};
 use verifier_schema::{DlcVerifyResult, VerificationStatus};
@@ -318,13 +318,15 @@ fn fixed<const N: usize>(field: &str, value: &str) -> Result<[u8; N], String> {
         .map_err(|_| format!("invalid {field}: expected {N} bytes"))
 }
 
+/// Attestations in flight, timed-out ones included. `/health` is not subject to it.
+static ATTEST_SLOTS: Semaphore = Semaphore::const_new(8);
+
 /// Build the attester's router.
 pub fn router(config: Config) -> Router {
     Router::new()
         .route("/health", get(async || Json(json!({"status": "healthy"}))))
         .route("/v1/attest", post(handle))
         .layer(DefaultBodyLimit::max(7 * 1024 * 1024))
-        .layer(ConcurrencyLimitLayer::new(8))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(30),
@@ -333,8 +335,18 @@ pub fn router(config: Config) -> Router {
 }
 
 async fn handle(State(config): State<Arc<Config>>, Json(request): Json<AttestRequest>) -> Response {
+    // ponytail: the permit rides inside the blocking task, so a request that times out keeps its
+    // slot until the work actually ends; tower's ConcurrencyLimitLayer released it at the timeout.
+    let Ok(permit) = ATTEST_SLOTS.acquire().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     // Request bodies and loan terms are never logged.
-    match tokio::task::spawn_blocking(move || attest(&config, &request)).await {
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        attest(&config, &request)
+    })
+    .await
+    {
         Ok(Ok(receipt)) => Json(receipt).into_response(),
         Ok(Err(error)) => (
             StatusCode::UNPROCESSABLE_ENTITY,
