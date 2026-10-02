@@ -123,6 +123,11 @@ pub fn verify_lock(network: Network, proof: &LockProof) -> Result<Lock, SpvError
     let mut node = txid.to_byte_array();
     let mut index = proof.tx_index;
     for sibling in &proof.merkle_branch {
+        // Bitcoin pairs the last node of an odd level with itself, always as the left node. An
+        // equal pair on the right would place the transaction at a position the block lacks.
+        if index & 1 == 1 && *sibling == node {
+            return Err(SpvError::IndexOutOfRange);
+        }
         let mut engine = sha256d::Hash::engine();
         let (left, right) = if index & 1 == 0 {
             (&node, sibling)
@@ -265,5 +270,32 @@ mod tests {
             Err(SpvError::NotInBlock)
         );
         assert_eq!(check(|p| p.vout = 2), Err(SpvError::NoSuchOutput));
+    }
+
+    #[test]
+    fn self_paired_leaf_is_valid_only_on_the_left() {
+        // A three-transaction regtest block with the proven transaction last, so its leaf is
+        // paired with itself.
+        let pair = |left: [u8; 32], right: [u8; 32]| {
+            sha256d::Hash::hash(&[left, right].concat()).to_byte_array()
+        };
+        let mut proof = proof();
+        let leaf = proof.tx.compute_txid().to_byte_array();
+        let others = pair([1; 32], [2; 32]);
+        let mut header = genesis_block(Network::Regtest).header;
+        header.merkle_root = TxMerkleNode::from_byte_array(pair(others, pair(leaf, leaf)));
+        while header.validate_pow(header.target()).is_err() {
+            header.nonce += 1;
+        }
+        proof.headers = vec![header];
+        proof.merkle_branch = vec![leaf, others];
+
+        proof.tx_index = 2;
+        assert!(verify_lock(Network::Regtest, &proof).is_ok());
+        proof.tx_index = 3;
+        assert_eq!(
+            verify_lock(Network::Regtest, &proof),
+            Err(SpvError::IndexOutOfRange)
+        );
     }
 }
