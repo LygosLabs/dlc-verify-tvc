@@ -12,7 +12,10 @@ use ddk_messages::{
     contract_msgs::{ContractDescriptor, ContractInfo},
     oracle_msgs::{EventDescriptor, OracleInfo},
 };
-use lightning::{io::Cursor, util::ser::Readable};
+use lightning::{
+    io::Cursor,
+    util::ser::{Readable, Writeable},
+};
 use secp256k1_zkp::Secp256k1;
 use sha2::{Digest, Sha256};
 use verifier_schema::{
@@ -327,6 +330,48 @@ fn compatibility_parse_failure(
     result
 }
 
+/// The single enumerated oracle announcement an offer's CETs are signed against.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfferAnnouncement {
+    /// Chain hash the offer names.
+    pub chain_hash: [u8; 32],
+    /// The announcement as the offer serializes it.
+    pub bytes: Vec<u8>,
+    /// Oracle event id.
+    pub event_id: String,
+    /// Outcomes in the oracle's order.
+    pub outcomes: Vec<String>,
+}
+
+/// Extract the oracle announcement from an offer.
+///
+/// # Errors
+///
+/// Fails when the offer does not parse or is not a single-oracle enumerated contract.
+pub fn offer_announcement(offer_hex: &str) -> Result<OfferAnnouncement, VerifyError> {
+    let unsupported = |detail: &str| VerifyError::InvalidMessage {
+        field: "offer",
+        detail: detail.to_owned(),
+    };
+    let offer: OfferDlc = strict_read("offer", &decode_hex("offer", offer_hex)?)?;
+    let ContractInfo::SingleContractInfo(single) = &offer.contract_info else {
+        return Err(unsupported("disjoint contracts are not supported"));
+    };
+    let OracleInfo::Single(oracle) = &single.contract_info.oracle_info else {
+        return Err(unsupported("exactly one oracle is required"));
+    };
+    let announcement = &oracle.oracle_announcement;
+    let EventDescriptor::EnumEvent(descriptor) = &announcement.oracle_event.event_descriptor else {
+        return Err(unsupported("an enumerated oracle event is required"));
+    };
+    Ok(OfferAnnouncement {
+        chain_hash: offer.chain_hash,
+        bytes: announcement.encode(),
+        event_id: announcement.oracle_event.event_id.clone(),
+        outcomes: descriptor.outcomes.clone(),
+    })
+}
+
 /// Reproduce the PR #9 DLC Verify result with DDK-native Rust verification.
 ///
 /// Malformed or unsupported bounded inputs produce a structured fail-closed result rather than
@@ -491,12 +536,18 @@ pub fn verify_dlc_compatibility(
         Err(error) => result.oracle_sig_error = Some(error.to_string()),
     }
 
-    let reconstruction =
-        match reconstruction::reconstruct(&offer, &accept, descriptor, bitcoin_network) {
-            Ok(reconstruction) => reconstruction,
-            Err(error) => return compatibility_parse_failure(result, sign_requested, error),
-        };
-    let funding_script = &reconstruction.transactions.funding_script_pubkey;
+    let (reconstruction, signatures) = match reconstruction::reconstruct_and_verify(
+        &offer,
+        &accept,
+        sign.as_ref(),
+        descriptor,
+        announcement,
+        bitcoin_network,
+    ) {
+        Ok(verified) => verified,
+        Err(error) => return compatibility_parse_failure(result, sign_requested, error),
+    };
+    let funding_script = &reconstruction.transactions.funding_witness_script;
     result.witness_script = Some(hex::encode(funding_script.as_bytes()));
     result.funding_address = address_for_script(&funding_script.to_p2wsh(), bitcoin_network);
     result.offer_inputs = reconstruction
@@ -557,14 +608,6 @@ pub fn verify_dlc_compatibility(
         })
         .collect();
 
-    let signatures = reconstruction::verify_signatures(
-        &offer,
-        &accept,
-        sign.as_ref(),
-        descriptor,
-        announcement,
-        &reconstruction,
-    );
     result.adaptor_sig_verification_available = true;
     result.adaptor_valid = Some(signatures.accept_adaptor_valid);
     result.adaptor_valid_count = signatures.accept_adaptor_valid_count;
@@ -1054,6 +1097,7 @@ mod tests {
             fee_rate_per_vb: 1,
             cet_locktime: 10,
             refund_locktime: 30,
+            tlvs: Default::default(),
         };
         assert!(validate_contract_maturity(&offer, 20).is_ok());
 

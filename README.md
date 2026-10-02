@@ -4,7 +4,7 @@ A deterministic Rust/DDK implementation of [Lygos DLC Verify](https://github.com
 
 For the current Lygos contract shape—one enumerated contract and one oracle—the Rust verifier reconstructs the funding transaction, CETs, and refund transaction; binds the signed oracle event descriptor to the contract outcomes; verifies the oracle announcement, adaptor signatures, refund signatures, contract linkage, and available funding witnesses; and returns the complete PR #9 result and policy schemas. Checked-in TypeScript goldens cover unsigned and fully signed real transcripts, including exact txids, output facts, contract ID, transcript hash, policy hash, verification digest, and every output field.
 
-The consensus-critical dependency line is pinned exactly to `ddk-messages = 1.1.2`, `ddk-dlc = 1.1.2`, `bitcoin = 0.32.6`, `lightning = 0.2.2`, and `secp256k1-zkp = 0.11.0`. This implementation does not use `rust-dlc`.
+The consensus-critical dependency line is pinned exactly to `ddk-messages = 2.0.0-rc.8`, `ddk-dlc = 2.0.0-rc.8`, `bitcoin = 0.32.6`, `lightning = 0.2.2`, and `secp256k1-zkp = 0.11.0`. This implementation does not use `rust-dlc`.
 
 ## API
 

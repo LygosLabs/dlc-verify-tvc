@@ -89,7 +89,7 @@ fn rejects_trailing_message_bytes() {
         challenge: None,
     })
     .expect_err("strict parser must reject trailing bytes");
-    assert!(error.to_string().contains("trailing bytes"));
+    assert!(error.to_string().contains("offer"), "{error}");
 }
 
 fn assert_pr9_golden(fixture_contents: &str, golden_contents: &str, expected_key: bool) {

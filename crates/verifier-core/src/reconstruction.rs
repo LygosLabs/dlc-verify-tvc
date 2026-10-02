@@ -10,8 +10,8 @@ use bitcoin::{
     consensus::deserialize, hashes::Hash as _, sighash::SighashCache,
 };
 use ddk_dlc::{
-    DlcTransactions, OracleInfo as DlcOracleInfo, PartyParams, Payout, TxInputInfo,
-    create_dlc_transactions, create_spliced_dlc_transactions,
+    DlcTransactions, FeeRule, OracleInfo as DlcOracleInfo, PartyParams, Payout, TxInputInfo,
+    create_dlc_transactions_with_fee_rule, create_spliced_dlc_transactions_with_fee_rule,
     verify_cet_adaptor_sig_from_oracle_info, verify_tx_input_sig,
 };
 use ddk_messages::{
@@ -372,6 +372,7 @@ pub(crate) fn reconstruct(
     accept: &AcceptDlc,
     descriptor: &EnumeratedContractDescriptor,
     rendering_network: Network,
+    fee_rule: FeeRule,
 ) -> Result<Reconstruction, String> {
     validate_reconstruction_inputs(offer, accept, descriptor)?;
     let total_collateral = offer.get_total_collateral();
@@ -409,7 +410,7 @@ pub(crate) fn reconstruct(
     let spliced = !offer_params.dlc_inputs.is_empty() || !accept_params.dlc_inputs.is_empty();
     let transaction_result = catch_unwind(AssertUnwindSafe(|| {
         if spliced {
-            create_spliced_dlc_transactions(
+            create_spliced_dlc_transactions_with_fee_rule(
                 &offer_params,
                 &accept_params,
                 &payouts,
@@ -419,9 +420,10 @@ pub(crate) fn reconstruct(
                 offer.cet_locktime,
                 offer.fund_output_serial_id,
                 offer.contract_flags,
+                fee_rule,
             )
         } else {
-            create_dlc_transactions(
+            create_dlc_transactions_with_fee_rule(
                 &offer_params,
                 &accept_params,
                 &payouts,
@@ -431,6 +433,7 @@ pub(crate) fn reconstruct(
                 offer.cet_locktime,
                 offer.fund_output_serial_id,
                 offer.contract_flags,
+                fee_rule,
             )
         }
     }))
@@ -445,7 +448,7 @@ pub(crate) fn reconstruct(
         ));
     }
 
-    let funding_output_script = transactions.funding_script_pubkey.to_p2wsh();
+    let funding_output_script = transactions.funding_witness_script.to_p2wsh();
     let matching_outputs = transactions
         .fund
         .output
@@ -517,7 +520,7 @@ fn verify_adaptors(
                 &reconstruction.transactions.cets[index],
                 &oracle_infos,
                 pubkey,
-                &reconstruction.transactions.funding_script_pubkey,
+                &reconstruction.transactions.funding_witness_script,
                 reconstruction.funding_value,
                 &messages,
             )
@@ -545,7 +548,7 @@ fn verify_refund_signature(
             signature,
             &reconstruction.transactions.refund,
             0,
-            &reconstruction.transactions.funding_script_pubkey,
+            &reconstruction.transactions.funding_witness_script,
             reconstruction.funding_value,
             pubkey,
         )
@@ -849,7 +852,40 @@ fn verify_funding_witnesses(
     }
 }
 
-pub(crate) fn verify_signatures(
+/// Rebuilds the DLC and checks its signatures under the DDK 2.0 fee rule,
+/// falling back to the DDK 1.x rule when only that one matches the accepter's
+/// adaptor signatures. Nothing on the wire says which rule a contract used.
+pub(crate) fn reconstruct_and_verify(
+    offer: &OfferDlc,
+    accept: &AcceptDlc,
+    sign: Option<&SignDlc>,
+    descriptor: &EnumeratedContractDescriptor,
+    announcement: &OracleAnnouncement,
+    rendering_network: Network,
+) -> Result<(Reconstruction, SignatureChecks), String> {
+    let attempt = |fee_rule| {
+        let reconstruction = reconstruct(offer, accept, descriptor, rendering_network, fee_rule)?;
+        let checks = verify_signatures(
+            offer,
+            accept,
+            sign,
+            descriptor,
+            announcement,
+            &reconstruction,
+        );
+        Ok::<_, String>((reconstruction, checks))
+    };
+    let current = attempt(FeeRule::CounterpartyPayout)?;
+    if current.1.accept_adaptor_valid {
+        return Ok(current);
+    }
+    match attempt(FeeRule::OwnPayoutOnly) {
+        Ok(legacy) if legacy.1.accept_adaptor_valid => Ok(legacy),
+        _ => Ok(current),
+    }
+}
+
+fn verify_signatures(
     offer: &OfferDlc,
     accept: &AcceptDlc,
     sign: Option<&SignDlc>,
@@ -983,7 +1019,13 @@ mod tests {
     fn sample_reconstruction_matches_expected_transactions() -> Result<(), String> {
         let (offer, accept, sign) = fixture(include_str!("../tests/fixtures/sample.json"))?;
         let (descriptor, announcement) = descriptor_and_announcement(&offer)?;
-        let reconstructed = reconstruct(&offer, &accept, descriptor, Network::Bitcoin)?;
+        let reconstructed = reconstruct(
+            &offer,
+            &accept,
+            descriptor,
+            Network::Bitcoin,
+            FeeRule::OwnPayoutOnly,
+        )?;
         let checks = verify_signatures(
             &offer,
             &accept,
@@ -1028,7 +1070,13 @@ mod tests {
         let (offer, accept, sign) =
             fixture(include_str!("../tests/fixtures/testnet-loan-118c9fc9.json"))?;
         let (descriptor, announcement) = descriptor_and_announcement(&offer)?;
-        let reconstructed = reconstruct(&offer, &accept, descriptor, Network::Testnet)?;
+        let reconstructed = reconstruct(
+            &offer,
+            &accept,
+            descriptor,
+            Network::Testnet,
+            FeeRule::OwnPayoutOnly,
+        )?;
         let checks = verify_signatures(
             &offer,
             &accept,
@@ -1081,15 +1129,27 @@ mod tests {
             fixture(include_str!("../tests/fixtures/testnet-loan-118c9fc9.json"))?;
         let (descriptor, _) = descriptor_and_announcement(&offer)?;
         accept.change_serial_id = offer.fund_output_serial_id;
-        let serial_error = reconstruct(&offer, &accept, descriptor, Network::Testnet)
-            .err()
-            .ok_or_else(|| "duplicate serial ID was accepted".to_owned())?;
+        let serial_error = reconstruct(
+            &offer,
+            &accept,
+            descriptor,
+            Network::Testnet,
+            FeeRule::OwnPayoutOnly,
+        )
+        .err()
+        .ok_or_else(|| "duplicate serial ID was accepted".to_owned())?;
         assert!(serial_error.contains("duplicate funding output serial ID"));
 
         let (offer, accept, mut sign) =
             fixture(include_str!("../tests/fixtures/testnet-loan-118c9fc9.json"))?;
         let (descriptor, announcement) = descriptor_and_announcement(&offer)?;
-        let reconstructed = reconstruct(&offer, &accept, descriptor, Network::Testnet)?;
+        let reconstructed = reconstruct(
+            &offer,
+            &accept,
+            descriptor,
+            Network::Testnet,
+            FeeRule::OwnPayoutOnly,
+        )?;
         let sign = sign
             .as_mut()
             .ok_or_else(|| "signed fixture has no Sign message".to_owned())?;
