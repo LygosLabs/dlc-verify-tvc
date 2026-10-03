@@ -7,12 +7,16 @@ use std::collections::HashSet;
 use bitcoin::{
     Amount, Network as BitcoinNetwork, blockdata::constants::genesis_block, hashes::Hash as _,
 };
+use ddk_dlc::FeeRule;
 use ddk_messages::{
-    AcceptDlc, OfferDlc, SignDlc,
+    AcceptDlc, OfferDlc, SignDlc, TlvStream,
     contract_msgs::{ContractDescriptor, ContractInfo},
     oracle_msgs::{EventDescriptor, OracleInfo},
 };
-use lightning::{io::Cursor, util::ser::Readable};
+use lightning::{
+    io::Cursor,
+    util::ser::{Readable, Writeable},
+};
 use secp256k1_zkp::Secp256k1;
 use sha2::{Digest, Sha256};
 use verifier_schema::{
@@ -76,12 +80,43 @@ fn decode_hex(field: &'static str, value: &str) -> Result<Vec<u8>, VerifyError> 
     })
 }
 
-fn strict_read<T: Readable>(field: &'static str, bytes: &[u8]) -> Result<T, VerifyError> {
+/// The TLV stream DDK 2.0 reads after a message's fixed fields.
+trait Tlvs {
+    fn tlvs(&self) -> &TlvStream;
+}
+
+impl Tlvs for OfferDlc {
+    fn tlvs(&self) -> &TlvStream {
+        &self.tlvs
+    }
+}
+
+impl Tlvs for AcceptDlc {
+    fn tlvs(&self) -> &TlvStream {
+        &self.tlvs
+    }
+}
+
+impl Tlvs for SignDlc {
+    fn tlvs(&self) -> &TlvStream {
+        &self.tlvs
+    }
+}
+
+fn strict_read<T: Readable + Tlvs>(field: &'static str, bytes: &[u8]) -> Result<T, VerifyError> {
     let mut cursor = Cursor::new(bytes);
     let value = T::read(&mut cursor).map_err(|error| VerifyError::InvalidMessage {
         field,
         detail: format!("{error:?}"),
     })?;
+    // DDK 2.0 swallows trailing bytes as TLV records, which would make the transcript hash
+    // malleable. No Lygos message carries TLVs, so any record is trailing data.
+    if !value.tlvs().is_empty() {
+        return Err(VerifyError::InvalidMessage {
+            field,
+            detail: "trailing bytes: unexpected TLV records".to_owned(),
+        });
+    }
     if cursor.position() != bytes.len() as u64 {
         return Err(VerifyError::InvalidMessage {
             field,
@@ -327,6 +362,51 @@ fn compatibility_parse_failure(
     result
 }
 
+/// The single enumerated oracle announcement an offer's CETs are signed against.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfferAnnouncement {
+    /// Chain hash the offer names.
+    pub chain_hash: [u8; 32],
+    /// The offer's signed contract flags, which select the refund layout.
+    pub contract_flags: u8,
+    /// The announcement as the offer serializes it.
+    pub bytes: Vec<u8>,
+    /// Oracle event id.
+    pub event_id: String,
+    /// Outcomes in the oracle's order.
+    pub outcomes: Vec<String>,
+}
+
+/// Extract the oracle announcement from an offer.
+///
+/// # Errors
+///
+/// Fails when the offer does not parse or is not a single-oracle enumerated contract.
+pub fn offer_announcement(offer_hex: &str) -> Result<OfferAnnouncement, VerifyError> {
+    let unsupported = |detail: &str| VerifyError::InvalidMessage {
+        field: "offer",
+        detail: detail.to_owned(),
+    };
+    let offer: OfferDlc = strict_read("offer", &decode_hex("offer", offer_hex)?)?;
+    let ContractInfo::SingleContractInfo(single) = &offer.contract_info else {
+        return Err(unsupported("disjoint contracts are not supported"));
+    };
+    let OracleInfo::Single(oracle) = &single.contract_info.oracle_info else {
+        return Err(unsupported("exactly one oracle is required"));
+    };
+    let announcement = &oracle.oracle_announcement;
+    let EventDescriptor::EnumEvent(descriptor) = &announcement.oracle_event.event_descriptor else {
+        return Err(unsupported("an enumerated oracle event is required"));
+    };
+    Ok(OfferAnnouncement {
+        chain_hash: offer.chain_hash,
+        contract_flags: offer.contract_flags,
+        bytes: announcement.encode(),
+        event_id: announcement.oracle_event.event_id.clone(),
+        outcomes: descriptor.outcomes.clone(),
+    })
+}
+
 /// Reproduce the PR #9 DLC Verify result with DDK-native Rust verification.
 ///
 /// Malformed or unsupported bounded inputs produce a structured fail-closed result rather than
@@ -491,12 +571,18 @@ pub fn verify_dlc_compatibility(
         Err(error) => result.oracle_sig_error = Some(error.to_string()),
     }
 
-    let reconstruction =
-        match reconstruction::reconstruct(&offer, &accept, descriptor, bitcoin_network) {
-            Ok(reconstruction) => reconstruction,
-            Err(error) => return compatibility_parse_failure(result, sign_requested, error),
-        };
-    let funding_script = &reconstruction.transactions.funding_script_pubkey;
+    let (reconstruction, signatures) = match reconstruction::reconstruct_and_verify(
+        &offer,
+        &accept,
+        sign.as_ref(),
+        descriptor,
+        announcement,
+        bitcoin_network,
+    ) {
+        Ok(verified) => verified,
+        Err(error) => return compatibility_parse_failure(result, sign_requested, error),
+    };
+    let funding_script = &reconstruction.transactions.funding_witness_script;
     result.witness_script = Some(hex::encode(funding_script.as_bytes()));
     result.funding_address = address_for_script(&funding_script.to_p2wsh(), bitcoin_network);
     result.offer_inputs = reconstruction
@@ -557,14 +643,6 @@ pub fn verify_dlc_compatibility(
         })
         .collect();
 
-    let signatures = reconstruction::verify_signatures(
-        &offer,
-        &accept,
-        sign.as_ref(),
-        descriptor,
-        announcement,
-        &reconstruction,
-    );
     result.adaptor_sig_verification_available = true;
     result.adaptor_valid = Some(signatures.accept_adaptor_valid);
     result.adaptor_valid_count = signatures.accept_adaptor_valid_count;
@@ -587,9 +665,14 @@ pub fn verify_dlc_compatibility(
         .sign_refund_valid
         .is_some_and(|valid| !valid)
         .then(|| "Offerer refund signature verification failed".to_owned());
+    // The TypeScript goldens pin the 1.x wording; only the DDK 2.0 fee rule is called out.
+    let fee_rule = match signatures.fee_rule {
+        FeeRule::OwnPayoutOnly => "",
+        FeeRule::CounterpartyPayout => ", DDK 2.0 counterparty-payout fee rule",
+    };
     result.adaptor_sig_verification_note = Some(if signatures.accept_adaptor_valid {
         format!(
-            "All {} CET adaptor signatures cryptographically valid (DDK)",
+            "All {} CET adaptor signatures cryptographically valid (DDK{fee_rule})",
             signatures.accept_adaptor_total_count
         )
     } else {
@@ -1054,6 +1137,7 @@ mod tests {
             fee_rate_per_vb: 1,
             cet_locktime: 10,
             refund_locktime: 30,
+            tlvs: Default::default(),
         };
         assert!(validate_contract_maturity(&offer, 20).is_ok());
 

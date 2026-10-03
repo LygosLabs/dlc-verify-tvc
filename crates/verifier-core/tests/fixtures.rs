@@ -81,15 +81,28 @@ fn parses_signed_testnet_loan() {
 #[test]
 fn rejects_trailing_message_bytes() {
     let fixture = fixture(include_str!("fixtures/sample.json"));
+    // A truncated record and a well-formed unknown record (type 65535, empty): DDK 2.0 reads
+    // the second one as a TLV, so the strict parser has to refuse it itself.
+    for trailing in ["00", "fdffff00"] {
+        let error = verify(&VerificationRequest {
+            offer: format!("{}{trailing}", fixture.offer),
+            accept: fixture.accept.clone(),
+            sign: None,
+            policy: None,
+            challenge: None,
+        })
+        .expect_err("strict parser must reject trailing bytes");
+        assert!(error.to_string().contains("offer"), "{error}");
+    }
     let error = verify(&VerificationRequest {
-        offer: format!("{}00", fixture.offer),
+        offer: format!("{}fdffff00", fixture.offer),
         accept: fixture.accept,
         sign: None,
         policy: None,
         challenge: None,
     })
     .expect_err("strict parser must reject trailing bytes");
-    assert!(error.to_string().contains("trailing bytes"));
+    assert!(error.to_string().contains("trailing"), "{error}");
 }
 
 fn assert_pr9_golden(fixture_contents: &str, golden_contents: &str, expected_key: bool) {

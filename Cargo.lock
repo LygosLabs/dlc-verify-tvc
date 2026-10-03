@@ -804,9 +804,9 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "ddk-dlc"
-version = "1.1.2"
+version = "2.0.0-rc.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c44c6ac219a34a0e9b7d2418453ae815965e1159142d7e88ba6fdc6cc9ac29fc"
+checksum = "6f5e49e4376fad02e7056ce6ef63576fcf0436e960fb0896d76945503c16ce34"
 dependencies = [
  "bitcoin",
  "miniscript",
@@ -816,9 +816,9 @@ dependencies = [
 
 [[package]]
 name = "ddk-messages"
-version = "1.1.2"
+version = "2.0.0-rc.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3663e44b26827cc955399e1dfe72858f9112308a57a78d527cd6f0f17c2b9d16"
+checksum = "94f39ff3727586245b2ccbe5bd776dbe3330352433c19de06e07a647731715ad"
 dependencies = [
  "bitcoin",
  "ddk-dlc",
@@ -1027,7 +1027,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1940,6 +1940,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "mint-attester"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "bitcoin",
+ "clap",
+ "hex",
+ "p256",
+ "qos_core",
+ "qos_p256",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sha3",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "verifier-core",
+ "verifier-schema",
+]
+
+[[package]]
 name = "mio"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2534,7 +2558,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2788,7 +2812,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3337,7 +3361,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

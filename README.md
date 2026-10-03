@@ -4,7 +4,7 @@ A deterministic Rust/DDK implementation of [Lygos DLC Verify](https://github.com
 
 For the current Lygos contract shape—one enumerated contract and one oracle—the Rust verifier reconstructs the funding transaction, CETs, and refund transaction; binds the signed oracle event descriptor to the contract outcomes; verifies the oracle announcement, adaptor signatures, refund signatures, contract linkage, and available funding witnesses; and returns the complete PR #9 result and policy schemas. Checked-in TypeScript goldens cover unsigned and fully signed real transcripts, including exact txids, output facts, contract ID, transcript hash, policy hash, verification digest, and every output field.
 
-The consensus-critical dependency line is pinned exactly to `ddk-messages = 1.1.2`, `ddk-dlc = 1.1.2`, `bitcoin = 0.32.6`, `lightning = 0.2.2`, and `secp256k1-zkp = 0.11.0`. This implementation does not use `rust-dlc`.
+The consensus-critical dependency line is pinned exactly to `ddk-messages = 2.0.0-rc.8`, `ddk-dlc = 2.0.0-rc.8`, `bitcoin = 0.32.6`, `lightning = 0.2.2`, and `secp256k1-zkp = 0.11.0`. This implementation does not use `rust-dlc`.
 
 ## API
 
@@ -69,11 +69,39 @@ Release identity templates live under `release/`. A production release is not au
 
 An empty `qosCommit` records the value actually committed by the current QOS manifest; it does not establish QOS source-commit provenance. Release artifacts must set `qosCommitProvenanceAvailable` accordingly and rely on the pinned PCRs and manifest hash for the evidence QOS actually provides.
 
+## Mint attester
+
+`crates/mint-attester` is a second TVC application in this workspace. It checks a Midnight DLC and its Bitcoin lock by SPV, then signs the receipt that `lygos-contracts` `Verifier.sol` accepts. The signer is the signing half of the application's quorum key, so it must run as its own TVC app with a quorum key Lygos generates. The default Turnkey quorum key is shared and must not be used.
+
+- `GET /health` — liveness.
+- `POST /v1/attest` — DLC transcript, lock proof, and loan terms in; signed receipt out, or `422` with the reason for refusal.
+
+Everything the attester pins is a launch argument, so the QOS manifest measures it: `--network`, `--lygos-funding-pubkey`, `--oracle-pubkey`. Any network other than mainnet is refused unless `--allow-insecure-network` is also passed, because its proof of work is free to forge. Egress stays disabled; a relayer supplies the headers and Merkle proof. A Midnight DLC must refund to the accepter (contract flag `0x01`) with Lygos as the accepter, so the refund pays the Lygos side; anything else is refused.
+
+Build the image with `make out/mint-attester/index.json`. CI publishes it as `ghcr.io/lygoslabs/mint-attester` and prints the image digest and executable digest.
+
+Deployment, from `tvc-configs/*.mint-attester.example.json`:
+
+1. Generate the quorum key, split 2-of-3 to the YubiKey operators. Write both files outside the repository; the metadata file holds the encrypted shares.
+   ```bash
+   tvc keys init-local-quorum-key -o <dir>/quorum_key.json
+   tvc keys generate-local-quorum-key -c <dir>/quorum_key.json --quorum-key-metadata-out <dir>/quorum_key_metadata.json
+   ```
+2. Put the quorum public key and the three operator keys in the app config, then `tvc app create --config-file <app config>`.
+3. Put the app id, image digest, executable digest, and pinned keys in the deploy config, then `tvc deploy create --config-file <deploy config>`.
+4. Two operators approve the manifest: `tvc deploy approve`.
+5. Two operators provision the key. Each runs `tvc deploy provisioning-details`, `tvc keys re-encrypt-local-share`, and `tvc deploy post-share`.
+6. `tvc app set-live-deploy`, then check `/health` on the app's `publicDomain`.
+
+Steps 4 and 5 repeat for every new deployment, so an upgrade needs two operators present.
+
+The `Verifier` constructor takes the signing half of the quorum public key: the second 65-byte SEC1 point of the 130-byte key, as `signerX` and `signerY`.
+
 ## Refund mode compatibility
 
 The verifier accepts contract flags `0x00` (refund each party its collateral) and
 `0x01` (DDK refund-to-accepter). Unknown bits remain rejected. The original signed
-flag is passed to DDK 1.1.2 transaction reconstruction, and both refund signatures
+flag is passed to DDK transaction reconstruction, and both refund signatures
 are verified against that transaction. The existing refund-pays-lender policy is
 unchanged: supporting a flag does not approve a lender role or a loan policy.
 

@@ -1,0 +1,31 @@
+[package]
+name = "mint-attester"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum = { workspace = true, features = ["http1", "tokio", "json"] }
+bitcoin = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+hex = { workspace = true }
+p256 = { workspace = true }
+qos_core = { workspace = true }
+qos_p256 = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+verifier-core = { path = "../verifier-core" }
+verifier-schema = { path = "../verifier-schema" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }

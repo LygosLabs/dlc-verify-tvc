@@ -7,3 +7,4 @@ local-enclave
 .env
 .env.*
 !.env.example
+quorum_key*.json
