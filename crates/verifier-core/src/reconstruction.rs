@@ -28,7 +28,8 @@ const MAX_WITNESS_ELEMENT_BYTES: usize = 16_384;
 const REGULAR_SPLICE_WITNESS_LEN: u16 = 108;
 const DLC_SPLICE_WITNESS_LEN: u16 = 220;
 const SUPPORTED_PROTOCOL_VERSION: u32 = 1;
-const SUPPORTED_CONTRACT_FLAGS: u8 = 0;
+// DDK 1.1.2 reconstructs the signed refund mode; unknown bits stay unsupported.
+const SUPPORTED_CONTRACT_FLAGS: u8 = ddk_dlc::REFUND_TO_ACCEPTER_FLAG;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FundingInputFact {
@@ -229,7 +230,7 @@ fn validate_reconstruction_inputs(
             offer.protocol_version, accept.protocol_version
         ));
     }
-    if offer.contract_flags != SUPPORTED_CONTRACT_FLAGS {
+    if offer.contract_flags & !SUPPORTED_CONTRACT_FLAGS != 0 {
         return Err(format!(
             "unsupported contract flags: {}",
             offer.contract_flags
@@ -977,6 +978,20 @@ mod tests {
             return Err("fixture does not use one oracle".to_owned());
         };
         Ok((descriptor, &oracle.oracle_announcement))
+    }
+
+    #[test]
+    fn only_the_refund_to_accepter_flag_bit_is_supported() -> Result<(), String> {
+        let (offer, accept, _) = fixture(include_str!("../tests/fixtures/sample.json"))?;
+        let (descriptor, _) = descriptor_and_announcement(&offer)?;
+        for flags in 0..=u8::MAX {
+            let mut flagged = offer.clone();
+            flagged.contract_flags = flags;
+            let refused = validate_reconstruction_inputs(&flagged, &accept, descriptor)
+                .is_err_and(|error| error.contains("unsupported contract flags"));
+            assert_eq!(refused, flags > ddk_dlc::REFUND_TO_ACCEPTER_FLAG, "{flags}");
+        }
+        Ok(())
     }
 
     #[test]
