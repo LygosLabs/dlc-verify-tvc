@@ -96,3 +96,15 @@ Deployment, from `tvc-configs/*.mint-attester.example.json`:
 Steps 4 and 5 repeat for every new deployment, so an upgrade needs two operators present.
 
 The `Verifier` constructor takes the signing half of the quorum public key: the second 65-byte SEC1 point of the 130-byte key, as `signerX` and `signerY`.
+
+## Refund mode compatibility
+
+The verifier accepts contract flags `0x00` (refund each party its collateral) and
+`0x01` (DDK refund-to-accepter). Unknown bits remain rejected. The original signed
+flag is passed to DDK transaction reconstruction, and both refund signatures
+are verified against that transaction. The existing refund-pays-lender policy is
+unchanged: supporting a flag does not approve a lender role or a loan policy.
+
+DDK tests the flag-one refund layout itself; this repo tests only that unknown
+bits are refused. The frozen TypeScript goldens remain the flag-zero compatibility
+target; this extension does not claim TypeScript flag-one parity.
