@@ -77,7 +77,6 @@ flag is passed to DDK 1.1.2 transaction reconstruction, and both refund signatur
 are verified against that transaction. The existing refund-pays-lender policy is
 unchanged: supporting a flag does not approve a lender role or a loan policy.
 
-`cargo test --locked -p verifier-core --test refund_to_accepter` exercises both
-modes using fresh synthetic signatures and deliberately public test keys. No
-private transcripts are included. The frozen TypeScript goldens remain the
-flag-zero compatibility target; this extension does not claim TypeScript flag-one parity.
+DDK tests the flag-one refund layout itself; this repo tests only that unknown
+bits are refused. The frozen TypeScript goldens remain the flag-zero compatibility
+target; this extension does not claim TypeScript flag-one parity.

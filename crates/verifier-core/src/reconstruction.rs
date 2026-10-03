@@ -981,6 +981,20 @@ mod tests {
     }
 
     #[test]
+    fn only_the_refund_to_accepter_flag_bit_is_supported() -> Result<(), String> {
+        let (offer, accept, _) = fixture(include_str!("../tests/fixtures/sample.json"))?;
+        let (descriptor, _) = descriptor_and_announcement(&offer)?;
+        for flags in 0..=u8::MAX {
+            let mut flagged = offer.clone();
+            flagged.contract_flags = flags;
+            let refused = validate_reconstruction_inputs(&flagged, &accept, descriptor)
+                .is_err_and(|error| error.contains("unsupported contract flags"));
+            assert_eq!(refused, flags > ddk_dlc::REFUND_TO_ACCEPTER_FLAG, "{flags}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn sample_reconstruction_matches_expected_transactions() -> Result<(), String> {
         let (offer, accept, sign) = fixture(include_str!("../tests/fixtures/sample.json"))?;
         let (descriptor, announcement) = descriptor_and_announcement(&offer)?;
