@@ -218,6 +218,18 @@ mod tests {
         assert_eq!(market.chain_id, 8453);
         assert_eq!(market.maturity, 1_798_156_800);
         assert!(super::market(&[0; 64]).is_err());
+        let good = hex::decode(MARKET).expect("hex");
+        let mut odd = good.clone();
+        odd.push(0);
+        let mut offset = good.clone();
+        offset[31] = 0x40;
+        let mut chain = good.clone();
+        chain[32] = 1;
+        let mut maturity = good;
+        maturity[5 * 32] = 1;
+        for blob in [odd, offset, chain, maturity] {
+            assert!(super::market(&blob).is_err());
+        }
     }
 
     #[test]

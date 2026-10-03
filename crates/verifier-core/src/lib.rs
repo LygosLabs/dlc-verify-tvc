@@ -9,7 +9,7 @@ use bitcoin::{
 };
 use ddk_dlc::FeeRule;
 use ddk_messages::{
-    AcceptDlc, OfferDlc, SignDlc,
+    AcceptDlc, OfferDlc, SignDlc, TlvStream,
     contract_msgs::{ContractDescriptor, ContractInfo},
     oracle_msgs::{EventDescriptor, OracleInfo},
 };
@@ -80,12 +80,43 @@ fn decode_hex(field: &'static str, value: &str) -> Result<Vec<u8>, VerifyError> 
     })
 }
 
-fn strict_read<T: Readable>(field: &'static str, bytes: &[u8]) -> Result<T, VerifyError> {
+/// The TLV stream DDK 2.0 reads after a message's fixed fields.
+trait Tlvs {
+    fn tlvs(&self) -> &TlvStream;
+}
+
+impl Tlvs for OfferDlc {
+    fn tlvs(&self) -> &TlvStream {
+        &self.tlvs
+    }
+}
+
+impl Tlvs for AcceptDlc {
+    fn tlvs(&self) -> &TlvStream {
+        &self.tlvs
+    }
+}
+
+impl Tlvs for SignDlc {
+    fn tlvs(&self) -> &TlvStream {
+        &self.tlvs
+    }
+}
+
+fn strict_read<T: Readable + Tlvs>(field: &'static str, bytes: &[u8]) -> Result<T, VerifyError> {
     let mut cursor = Cursor::new(bytes);
     let value = T::read(&mut cursor).map_err(|error| VerifyError::InvalidMessage {
         field,
         detail: format!("{error:?}"),
     })?;
+    // DDK 2.0 swallows trailing bytes as TLV records, which would make the transcript hash
+    // malleable. No Lygos message carries TLVs, so any record is trailing data.
+    if !value.tlvs().is_empty() {
+        return Err(VerifyError::InvalidMessage {
+            field,
+            detail: "trailing bytes: unexpected TLV records".to_owned(),
+        });
+    }
     if cursor.position() != bytes.len() as u64 {
         return Err(VerifyError::InvalidMessage {
             field,

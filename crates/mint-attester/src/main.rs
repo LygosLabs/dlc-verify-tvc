@@ -47,8 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| io::Error::other(format!("failed to load quorum key: {error:?}")))?;
     let app = router(Config {
         network: cli.network,
-        lygos_funding_pubkey: cli.lygos_funding_pubkey.to_string(),
-        oracle_pubkey: cli.oracle_pubkey.to_string(),
+        lygos_funding_pubkey: cli.lygos_funding_pubkey,
+        oracle_pubkey: cli.oracle_pubkey,
         key: quorum_key.signing_key().clone(),
         allow_insecure_network: cli.allow_insecure_network,
     });

@@ -46,6 +46,8 @@ pub struct Lock {
     pub sats: u64,
     /// Number of headers after the funding block.
     pub confirmations: u32,
+    /// Timestamp of the funding block's header.
+    pub block_time: u32,
 }
 
 /// Why a [`LockProof`] was refused.
@@ -162,6 +164,7 @@ pub fn verify_lock(network: Network, proof: &LockProof) -> Result<Lock, SpvError
             .collect(),
         sats: output.value.to_sat(),
         confirmations,
+        block_time: first.time,
     })
 }
 
@@ -176,21 +179,23 @@ fn max_target(network: Network) -> Target {
     }
 }
 
+/// A real mainnet lock, shared with the service tests.
 #[cfg(test)]
 #[allow(clippy::expect_used)]
-mod tests {
+pub(crate) mod fixture {
     use super::*;
-    use bitcoin::{TxMerkleNode, blockdata::constants::genesis_block, consensus::encode};
+    use bitcoin::{TxMerkleNode, consensus::encode};
 
     // Mainnet block 969,476 and the two blocks after it.
-    const HEADERS: [&str; 3] = [
+    pub(crate) const HEADERS: [&str; 3] = [
         "0080a0214070df70e93c153fef7dcb4071fe284621bd115985a300000000000000000000828958afe1c1ff1375116858748f96124fb1d7b81cad025ff38c9430f7c08da14ba7be6ac51e021718966236",
         "00c00520e34fc66c9307a8ae60525d5ec76649a1e5ccc15099c00100000000000000000052f9e942af4e81845d8d22c20d787e0266563e3263f03daba94fbace8a1b4aa802a8be6ac51e021706769862",
         "000000300b4a452a897d5d69e9bf02678b2c32dbc7ce55afa76f0100000000000000000033e20bd465b63241d5cd1fda79785dc4b68e26940e7b562b9fd50e8440104aa550a9be6ac51e0217f2272b4a",
     ];
     // Transaction 0679ab3a…0995, at position 1452 of block 969,476.
-    const TX: &str = "0200000001c80855c075b73710cc4809ceb6360f91b66841650645f171055857c06db65730000000006a473044022045df57200844828ed973e9ee4289afba0964d1000a6870b4cf73554c949228f902206ceb2ee3834e9af15ae5adc5af8544d5e149456cb3c3598ee3181dea67c4d94d01210210e3117cd0c4d2d62da092922caa8079c95ff441cc95f0d5d84feded1ff39419fdffffff0216604c01000000001600144ca5ceb6727f9b56bf4fddec0a4cca96d2059dd7e5d301000000000016001480a41ae8f432d3dd20e9e0f05827b5d5e19cc84903cb0e00";
-    const BRANCH: [&str; 12] = [
+    pub(crate) const TX: &str = "0200000001c80855c075b73710cc4809ceb6360f91b66841650645f171055857c06db65730000000006a473044022045df57200844828ed973e9ee4289afba0964d1000a6870b4cf73554c949228f902206ceb2ee3834e9af15ae5adc5af8544d5e149456cb3c3598ee3181dea67c4d94d01210210e3117cd0c4d2d62da092922caa8079c95ff441cc95f0d5d84feded1ff39419fdffffff0216604c01000000001600144ca5ceb6727f9b56bf4fddec0a4cca96d2059dd7e5d301000000000016001480a41ae8f432d3dd20e9e0f05827b5d5e19cc84903cb0e00";
+    pub(crate) const TX_INDEX: u32 = 1452;
+    pub(crate) const BRANCH: [&str; 12] = [
         "94f29a14afb647af594d9a2d45d5368bdccd24acc128d46ccb41122badbd0745",
         "41b50fd8d2efc0fb9aabeeb948c21921891872f3e86796536bc35233029acb49",
         "b1dbcab004fb684d5935ed1edce3b7208623d2435205c1100ece3283bd655b72",
@@ -205,11 +210,11 @@ mod tests {
         "7718f449e836cbcda1c9a6f7fa1901caaf9ae3c6b965587aa7f933b8aee1bc58",
     ];
 
-    fn proof() -> LockProof {
+    pub(crate) fn proof() -> LockProof {
         LockProof {
             tx: encode::deserialize_hex(TX).expect("tx"),
             vout: 0,
-            tx_index: 1452,
+            tx_index: TX_INDEX,
             merkle_branch: BRANCH
                 .iter()
                 .map(|node| node.parse::<TxMerkleNode>().expect("node").to_byte_array())
@@ -219,6 +224,42 @@ mod tests {
                 .map(|header| encode::deserialize_hex(header).expect("header"))
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::fixture::proof;
+    use super::*;
+    use bitcoin::{TxMerkleNode, blockdata::constants::genesis_block};
+
+    #[test]
+    fn refuses_a_64_byte_transaction() {
+        use bitcoin::{
+            Amount, OutPoint, Sequence, TxIn, TxOut, Witness, absolute::LockTime,
+            transaction::Version,
+        };
+        let mut proof = proof();
+        proof.tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::from_bytes(vec![0; 4]),
+            }],
+        };
+        assert_eq!(proof.tx.base_size(), 64);
+        assert_eq!(
+            verify_lock(Network::Bitcoin, &proof),
+            Err(SpvError::AmbiguousTransaction)
+        );
     }
 
     #[test]

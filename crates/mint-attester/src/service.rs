@@ -7,12 +7,19 @@ use crate::{
 };
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{DefaultBodyLimit, FromRequest, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use bitcoin::{Network, Txid, consensus::encode::deserialize_hex, hashes::Hash};
+use bitcoin::absolute::LOCK_TIME_THRESHOLD;
+use bitcoin::{
+    Network, ScriptBuf, Txid,
+    consensus::encode::deserialize_hex,
+    hashes::Hash,
+    secp256k1::{PublicKey, XOnlyPublicKey},
+};
 use p256::ecdsa::SigningKey;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -27,10 +34,11 @@ use verifier_schema::{DlcVerifyResult, VerificationStatus};
 pub struct Config {
     /// Bitcoin network the locks are on.
     pub network: Network,
-    /// The Midnight Lygos funding key, compressed, as lowercase hex.
-    pub lygos_funding_pubkey: String,
-    /// The Midnight oracle's x-only key, as lowercase hex.
-    pub oracle_pubkey: String,
+    /// The Midnight Lygos funding key.
+    pub lygos_funding_pubkey: PublicKey,
+    /// The Midnight oracle's key. Typed so an empty pin, which verifier-core reads as "no
+    /// expected oracle", cannot be constructed.
+    pub oracle_pubkey: XOnlyPublicKey,
     /// The quorum signing key the `Verifier` contract trusts.
     pub key: SigningKey,
     /// Sign receipts for a network whose proof of work is free to forge. Test deployments only.
@@ -104,14 +112,19 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
     };
     let verifier = fixed("verifier", &request.verifier)?;
 
+    // The cheap parse first: reconstruction allocates per outcome, and a Midnight list is a
+    // handful of entries, so an oversized one is refused before any signature work.
+    let announcement = offer_announcement(&request.offer).map_err(|error| error.to_string())?;
+    if announcement.outcomes.len() > MAX_OUTCOMES {
+        return Err(format!("more than {MAX_OUTCOMES} outcomes"));
+    }
     let dlc = verify_dlc_compatibility(
         &request.offer,
         &request.accept,
         Some(&request.sign),
-        Some(&config.oracle_pubkey),
+        Some(&config.oracle_pubkey.to_string()),
         Some(network_name(config.network)),
     );
-    let announcement = offer_announcement(&request.offer).map_err(|error| error.to_string())?;
 
     let proof = LockProof {
         tx: deserialize_hex(&request.tx).map_err(|error| format!("invalid tx: {error}"))?,
@@ -196,7 +209,8 @@ pub fn receipt_for(
         return Err("the DLC is for another Bitcoin network".to_owned());
     }
 
-    let lygos = config.lygos_funding_pubkey.as_str();
+    let lygos_key = config.lygos_funding_pubkey.to_string();
+    let lygos = lygos_key.as_str();
     let offerer = dlc.offerer_funding_pubkey.as_deref().unwrap_or_default();
     let accepter = dlc.accepter_funding_pubkey.as_deref().unwrap_or_default();
     let borrower = match (offerer == lygos, accepter == lygos) {
@@ -236,6 +250,54 @@ pub fn receipt_for(
         || dlc.funding_value_sats.as_deref() != Some(lock.sats.to_string().as_str())
     {
         return Err("the proven transaction is not the DLC's funding transaction".to_owned());
+    }
+    let funding_script = dlc
+        .witness_script
+        .as_deref()
+        .and_then(|script| hex::decode(script).ok())
+        .map(|script| ScriptBuf::from_bytes(script).to_p2wsh());
+    if funding_script.as_ref() != Some(&lock.script_pubkey) {
+        return Err("the proven output is not the DLC's funding output".to_owned());
+    }
+
+    // ponytail: payout addresses stay off-chain, where each co-signer checks its own, so only the
+    // split is checked here: Lygos stakes nothing, the borrower takes the whole collateral unless
+    // the loan is liquidated, and the Lygos side takes it all when it is.
+    let lygos_offers = offerer == lygos;
+    let stake = if lygos_offers {
+        &dlc.offer_collateral
+    } else {
+        &dlc.accept_collateral
+    };
+    if stake.as_deref() != Some("0") {
+        return Err("Lygos must stake no collateral".to_owned());
+    }
+    let total = dlc.total_collateral.as_deref().unwrap_or_default();
+    for outcome in &announcement.outcomes {
+        let payout = dlc.outcomes.iter().find(|payout| &payout.label == outcome);
+        let split = payout.map(|payout| {
+            let (lygos, borrower) = if lygos_offers {
+                (payout.offerer_sats.as_str(), payout.accepter_sats.as_str())
+            } else {
+                (payout.accepter_sats.as_str(), payout.offerer_sats.as_str())
+            };
+            if outcome.starts_with("liquidated-by-") {
+                (lygos, borrower)
+            } else {
+                (borrower, lygos)
+            }
+        });
+        if split != Some((total, "0")) {
+            return Err(format!(
+                "the {outcome} payout is not the whole collateral to one side"
+            ));
+        }
+    }
+    // A CET must be spendable as soon as the lock exists: no locktime, or a time the funding
+    // block has already passed. A block-height locktime cannot be checked without the height.
+    let cet_locktime = dlc.cet_locktime.ok_or("the DLC has no CET locktime")?;
+    if cet_locktime != 0 && !(LOCK_TIME_THRESHOLD..=lock.block_time).contains(&cet_locktime) {
+        return Err("the CET locktime is not a time before the funding block".to_owned());
     }
 
     let txid = |value: Option<&str>| -> Result<[u8; 32], String> {
@@ -326,6 +388,8 @@ fn fixed<const N: usize>(field: &str, value: &str) -> Result<[u8; N], String> {
 
 /// Attestations in flight, timed-out ones included. `/health` is not subject to it.
 static ATTEST_SLOTS: Semaphore = Semaphore::const_new(8);
+/// A Midnight outcome list is `not-minted`, `released`, and one entry per liquidator.
+const MAX_OUTCOMES: usize = 64;
 /// How long a request may take to deliver its body once it holds a slot.
 const BODY_READ_LIMIT: Duration = Duration::from_secs(5);
 
@@ -350,15 +414,18 @@ async fn handle(State(config): State<Arc<Config>>, request: Request) -> Response
     let Ok(permit) = ATTEST_SLOTS.acquire().await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let body = Json::<AttestRequest>::from_request(request, &());
-    let request = match tokio::time::timeout(BODY_READ_LIMIT, body).await {
-        Ok(Ok(Json(request))) => request,
+    let body = Bytes::from_request(request, &());
+    let body = match tokio::time::timeout(BODY_READ_LIMIT, body).await {
+        Ok(Ok(body)) => body,
         Ok(Err(rejection)) => return rejection.into_response(),
         Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
     };
-    // Request bodies and loan terms are never logged.
+    // Request bodies and loan terms are never logged. Parsing happens off the async runtime
+    // too: a 7 MiB body is a measurable stall for /health.
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        let request: AttestRequest =
+            serde_json::from_slice(&body).map_err(|error| format!("invalid request: {error}"))?;
         attest(&config, &request)
     })
     .await
@@ -381,20 +448,25 @@ async fn handle(State(config): State<Arc<Config>>, request: Request) -> Response
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use verifier_schema::CetTransactionInfo;
+    use verifier_schema::{CetTransactionInfo, OutcomeInfo};
 
-    const LYGOS: &str = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const BORROWER: &str = "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    // The generator and twice the generator: real points, so the typed config parses them.
+    const LYGOS: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const BORROWER: &str = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+    const ORACLE: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    /// Stand-in funding witness script; the lock's output is its P2WSH.
+    const WITNESS_SCRIPT: [u8; 1] = [0x51];
     const LIQUIDATOR: &str = "liquidated-by-0x00000000000000000000000000000000000000aa";
     // The market in `midnight::tests`: chain 8453, maturing at 1798156800.
     const MARKET: &str = "0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000210500000000000000000000000000000000000000000000000000000000000000a100000000000000000000000000000000000000000000000000000000000000b20000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000006b2db200000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000c30000000000000000000000000000000000000000000000000bef55718ad6000000000000000000000000000000000000000000000000000003782dace9d9000000000000000000000000000000000000000000000000000000000000000000d4";
     const MATURITY: u32 = 1_798_156_800;
+    const BLOCK_TIME: u32 = 1_790_000_000;
 
     fn config() -> Config {
         Config {
             network: Network::Bitcoin,
-            lygos_funding_pubkey: LYGOS.to_owned(),
-            oracle_pubkey: String::new(),
+            lygos_funding_pubkey: LYGOS.parse().expect("key"),
+            oracle_pubkey: ORACLE.parse().expect("key"),
             key: SigningKey::from_slice(&[7; 32]).expect("key"),
             allow_insecure_network: false,
         }
@@ -414,11 +486,12 @@ mod tests {
     fn lock() -> Lock {
         Lock {
             txid: Txid::from_byte_array([1; 32]),
-            script_pubkey: bitcoin::ScriptBuf::new(),
+            script_pubkey: ScriptBuf::from_bytes(WITNESS_SCRIPT.to_vec()).to_p2wsh(),
             claim_id: [2; 32],
             input_claim_ids: vec![[3; 32]],
             sats: 50_010_000,
             confirmations: 1,
+            block_time: BLOCK_TIME,
         }
     }
 
@@ -458,7 +531,29 @@ mod tests {
             refund_locktime: Some(MATURITY + 14 * 24 * 60 * 60),
             fund_tx_id: Some(lock().txid.to_string()),
             funding_value_sats: Some("50010000".to_owned()),
+            witness_script: Some(hex::encode(WITNESS_SCRIPT)),
             total_collateral: Some("50000000".to_owned()),
+            offer_collateral: Some("0".to_owned()),
+            accept_collateral: Some("50000000".to_owned()),
+            outcomes: [
+                ("not-minted", false),
+                ("released", false),
+                (LIQUIDATOR, true),
+            ]
+            .map(|(label, liquidated)| {
+                let (lygos, borrower) = if liquidated {
+                    ("50000000", "0")
+                } else {
+                    ("0", "50000000")
+                };
+                OutcomeInfo {
+                    label: label.to_owned(),
+                    offerer_sats: lygos.to_owned(),
+                    accepter_sats: borrower.to_owned(),
+                }
+            })
+            .to_vec(),
+            cet_locktime: Some(BLOCK_TIME),
             // Deliberately not in outcome order: the hash must follow the oracle's order.
             cets: vec![cet(LIQUIDATOR, 6), cet("not-minted", 4), cet("released", 5)],
             refund_tx_id: Some(Txid::from_byte_array([7; 32]).to_string()),
@@ -528,7 +623,19 @@ mod tests {
                 .contains("funding transaction")
         );
         assert!(refused(|_, _, l| l.sats += 1).contains("funding transaction"));
+        assert!(refused(|_, _, l| l.script_pubkey = ScriptBuf::new()).contains("funding output"));
+        assert!(refused(|d, _, _| d.witness_script = None).contains("funding output"));
         assert!(refused(|d, _, _| drop(d.cets.pop())).contains("missing a CET"));
+        assert!(refused(|d, _, _| d.offer_collateral = Some("1".to_owned())).contains("stake"));
+        // A liquidation that pays the borrower, a release that pays Lygos, and a short payout.
+        assert!(refused(|d, _, _| d.outcomes[2].offerer_sats = "0".to_owned()).contains("payout"));
+        assert!(
+            refused(|d, _, _| d.outcomes[1].accepter_sats = "49999999".to_owned())
+                .contains("payout")
+        );
+        assert!(refused(|d, _, _| drop(d.outcomes.pop())).contains("payout"));
+        assert!(refused(|d, _, _| d.cet_locktime = Some(BLOCK_TIME + 1)).contains("CET locktime"));
+        assert!(refused(|d, _, _| d.cet_locktime = Some(900_000)).contains("CET locktime"));
     }
 
     #[test]
@@ -587,8 +694,84 @@ mod tests {
         assert!(attempt(&config).contains("--allow-insecure-network"));
         config.allow_insecure_network = true;
         assert!(attempt(&config).contains("funding key"));
-        // Even with its own key pinned, its refund and outcomes are not Midnight's.
-        config.lygos_funding_pubkey = dlc.offerer_funding_pubkey.clone().expect("key");
-        assert!(!attempt(&config).contains("funding key"));
+        // Even with its own key pinned, the market blob is not where its collateral is.
+        config.lygos_funding_pubkey = dlc
+            .offerer_funding_pubkey
+            .as_deref()
+            .expect("key")
+            .parse()
+            .expect("key");
+        assert!(
+            attempt(&config).contains("refund locktime"),
+            "{}",
+            attempt(&config)
+        );
+    }
+
+    /// `attest` end to end up to the policy: the real mainnet lock proof in explorer byte order
+    /// passes SPV, and the real testnet transcript is then refused for being on another network.
+    #[test]
+    fn attest_reaches_the_policy_with_an_explorer_order_proof() {
+        use crate::spv::fixture::{BRANCH, HEADERS, TX, TX_INDEX};
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../verifier-core/tests/fixtures/testnet-loan-118c9fc9.json"
+        ))
+        .expect("fixture");
+        let field = |name: &str| fixture[name].as_str().expect("field").to_owned();
+        let mut config = config();
+        config.oracle_pubkey = field("oraclePubkey").parse().expect("oracle key");
+        let hex0x = |bytes: &[u8]| format!("0x{}", hex::encode(bytes));
+        let request = AttestRequest {
+            offer: field("offer"),
+            accept: field("accept"),
+            sign: field("sign"),
+            tx: TX.to_owned(),
+            tx_index: TX_INDEX,
+            merkle_branch: BRANCH.iter().map(|node| (*node).to_owned()).collect(),
+            headers: HEADERS.iter().map(|header| (*header).to_owned()).collect(),
+            market: MARKET.to_owned(),
+            chain_id: 8453,
+            originator: hex0x(&[0x56; 20]),
+            controller: hex0x(&[0xc0; 20]),
+            mint_deadline: 1_790_000_000,
+            announced_at: 1_789_000_000,
+            verifier: hex0x(&[0x11; 20]),
+        };
+        let error = attest(&config, &request).expect_err("a testnet DLC is refused on mainnet");
+        assert!(error.contains("another Bitcoin network"), "{error}");
+
+        let mut unreversed = request;
+        unreversed.merkle_branch = unreversed
+            .merkle_branch
+            .iter()
+            .map(|node| {
+                let mut bytes = hex::decode(node).expect("hex");
+                bytes.reverse();
+                hex::encode(bytes)
+            })
+            .collect();
+        let error = attest(&config, &unreversed).expect_err("internal byte order is wrong");
+        assert!(error.contains("lock proof refused: NotInBlock"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn the_endpoint_refuses_unknown_fields_and_bad_json() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+        let app = router(config());
+        let post = |body: &'static str| {
+            Request::post("/v1/attest")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("request")
+        };
+        let response = app
+            .clone()
+            .oneshot(post(r#"{"nope":1}"#))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let response = app.oneshot(post("{")).await.expect("response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

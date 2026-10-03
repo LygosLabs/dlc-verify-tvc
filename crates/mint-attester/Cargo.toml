@@ -26,3 +26,6 @@ verifier-schema = { path = "../verifier-schema" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }

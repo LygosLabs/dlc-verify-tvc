@@ -1955,6 +1955,7 @@ dependencies = [
  "sha2",
  "sha3",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",

@@ -1020,6 +1020,23 @@ mod tests {
     }
 
     #[test]
+    fn fallback_selects_the_legacy_fee_rule_for_a_1x_contract() -> Result<(), String> {
+        let (offer, accept, sign) = fixture(include_str!("../tests/fixtures/sample.json"))?;
+        let (descriptor, announcement) = descriptor_and_announcement(&offer)?;
+        let (_, checks) = reconstruct_and_verify(
+            &offer,
+            &accept,
+            sign.as_ref(),
+            descriptor,
+            announcement,
+            Network::Bitcoin,
+        )?;
+        assert_eq!(checks.fee_rule, FeeRule::OwnPayoutOnly);
+        assert!(checks.accept_adaptor_valid);
+        Ok(())
+    }
+
+    #[test]
     fn sample_reconstruction_matches_expected_transactions() -> Result<(), String> {
         let (offer, accept, sign) = fixture(include_str!("../tests/fixtures/sample.json"))?;
         let (descriptor, announcement) = descriptor_and_announcement(&offer)?;
