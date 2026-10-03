@@ -213,11 +213,18 @@ pub fn receipt_for(
     let lygos = lygos_key.as_str();
     let offerer = dlc.offerer_funding_pubkey.as_deref().unwrap_or_default();
     let accepter = dlc.accepter_funding_pubkey.as_deref().unwrap_or_default();
-    let borrower = match (offerer == lygos, accepter == lygos) {
-        (true, false) => accepter,
-        (false, true) => offerer,
-        _ => return Err("the 2-of-2 does not contain the Midnight Lygos funding key".to_owned()),
-    };
+    // The refund is the trusted last resort and must pay the Lygos side: the whole funding output
+    // to the accepter, with Lygos as the accepter.
+    if offerer == lygos || accepter != lygos {
+        return Err(
+            "the Midnight Lygos funding key must be the accepter's, and only the accepter's"
+                .to_owned(),
+        );
+    }
+    if announcement.contract_flags != REFUND_TO_ACCEPTER_FLAG {
+        return Err("the DLC must refund to the accepter (contract flags 0x01)".to_owned());
+    }
+    let borrower = offerer;
 
     let market = midnight::market(&terms.market)?;
     if market.chain_id != terms.chain_id {
@@ -263,24 +270,14 @@ pub fn receipt_for(
     // ponytail: payout addresses stay off-chain, where each co-signer checks its own, so only the
     // split is checked here: Lygos stakes nothing, the borrower takes the whole collateral unless
     // the loan is liquidated, and the Lygos side takes it all when it is.
-    let lygos_offers = offerer == lygos;
-    let stake = if lygos_offers {
-        &dlc.offer_collateral
-    } else {
-        &dlc.accept_collateral
-    };
-    if stake.as_deref() != Some("0") {
+    if dlc.accept_collateral.as_deref() != Some("0") {
         return Err("Lygos must stake no collateral".to_owned());
     }
     let total = dlc.total_collateral.as_deref().unwrap_or_default();
     for outcome in &announcement.outcomes {
         let payout = dlc.outcomes.iter().find(|payout| &payout.label == outcome);
         let split = payout.map(|payout| {
-            let (lygos, borrower) = if lygos_offers {
-                (payout.offerer_sats.as_str(), payout.accepter_sats.as_str())
-            } else {
-                (payout.accepter_sats.as_str(), payout.offerer_sats.as_str())
-            };
+            let (lygos, borrower) = (payout.accepter_sats.as_str(), payout.offerer_sats.as_str());
             if outcome.starts_with("liquidated-by-") {
                 (lygos, borrower)
             } else {
@@ -388,6 +385,8 @@ fn fixed<const N: usize>(field: &str, value: &str) -> Result<[u8; N], String> {
 
 /// Attestations in flight, timed-out ones included. `/health` is not subject to it.
 static ATTEST_SLOTS: Semaphore = Semaphore::const_new(8);
+/// DDK's refund-to-accepter contract flag.
+const REFUND_TO_ACCEPTER_FLAG: u8 = 0x01;
 /// A Midnight outcome list is `not-minted`, `released`, and one entry per liquidator.
 const MAX_OUTCOMES: usize = 64;
 /// How long a request may take to deliver its body once it holds a slot.
@@ -511,6 +510,7 @@ mod tests {
             bytes: vec![9; 100],
             event_id: format!("midnight-{}", hex::encode(event_id)),
             chain_hash: *Network::Bitcoin.chain_hash().as_bytes(),
+            contract_flags: REFUND_TO_ACCEPTER_FLAG,
             outcomes: ["not-minted", "released", LIQUIDATOR]
                 .map(str::to_owned)
                 .to_vec(),
@@ -526,15 +526,15 @@ mod tests {
         };
         DlcVerifyResult {
             verification_status: VerificationStatus::Pass,
-            offerer_funding_pubkey: Some(LYGOS.to_owned()),
-            accepter_funding_pubkey: Some(BORROWER.to_owned()),
+            offerer_funding_pubkey: Some(BORROWER.to_owned()),
+            accepter_funding_pubkey: Some(LYGOS.to_owned()),
             refund_locktime: Some(MATURITY + 14 * 24 * 60 * 60),
             fund_tx_id: Some(lock().txid.to_string()),
             funding_value_sats: Some("50010000".to_owned()),
             witness_script: Some(hex::encode(WITNESS_SCRIPT)),
             total_collateral: Some("50000000".to_owned()),
-            offer_collateral: Some("0".to_owned()),
-            accept_collateral: Some("50000000".to_owned()),
+            offer_collateral: Some("50000000".to_owned()),
+            accept_collateral: Some("0".to_owned()),
             outcomes: [
                 ("not-minted", false),
                 ("released", false),
@@ -548,8 +548,8 @@ mod tests {
                 };
                 OutcomeInfo {
                     label: label.to_owned(),
-                    offerer_sats: lygos.to_owned(),
-                    accepter_sats: borrower.to_owned(),
+                    offerer_sats: borrower.to_owned(),
+                    accepter_sats: lygos.to_owned(),
                 }
             })
             .to_vec(),
@@ -602,11 +602,11 @@ mod tests {
                 .contains("did not verify")
         );
         assert!(
-            refused(|d, _, _| d.offerer_funding_pubkey = Some(BORROWER.to_owned()))
+            refused(|d, _, _| d.offerer_funding_pubkey = Some(LYGOS.to_owned()))
                 .contains("funding key")
         );
         assert!(
-            refused(|d, _, _| d.accepter_funding_pubkey = Some(LYGOS.to_owned()))
+            refused(|d, _, _| d.accepter_funding_pubkey = Some(BORROWER.to_owned()))
                 .contains("funding key")
         );
         assert!(
@@ -626,11 +626,18 @@ mod tests {
         assert!(refused(|_, _, l| l.script_pubkey = ScriptBuf::new()).contains("funding output"));
         assert!(refused(|d, _, _| d.witness_script = None).contains("funding output"));
         assert!(refused(|d, _, _| drop(d.cets.pop())).contains("missing a CET"));
-        assert!(refused(|d, _, _| d.offer_collateral = Some("1".to_owned())).contains("stake"));
-        // A liquidation that pays the borrower, a release that pays Lygos, and a short payout.
-        assert!(refused(|d, _, _| d.outcomes[2].offerer_sats = "0".to_owned()).contains("payout"));
+        let mut each_party = announcement(&terms());
+        each_party.contract_flags = 0;
         assert!(
-            refused(|d, _, _| d.outcomes[1].accepter_sats = "49999999".to_owned())
+            receipt_for(&config(), &dlc(), &each_party, &lock(), &terms())
+                .expect_err("must be refused")
+                .contains("refund to the accepter")
+        );
+        assert!(refused(|d, _, _| d.accept_collateral = Some("1".to_owned())).contains("stake"));
+        // A liquidation that pays the borrower, a release that pays Lygos, and a short payout.
+        assert!(refused(|d, _, _| d.outcomes[2].accepter_sats = "0".to_owned()).contains("payout"));
+        assert!(
+            refused(|d, _, _| d.outcomes[1].offerer_sats = "49999999".to_owned())
                 .contains("payout")
         );
         assert!(refused(|d, _, _| drop(d.outcomes.pop())).contains("payout"));
@@ -694,15 +701,15 @@ mod tests {
         assert!(attempt(&config).contains("--allow-insecure-network"));
         config.allow_insecure_network = true;
         assert!(attempt(&config).contains("funding key"));
-        // Even with its own key pinned, the market blob is not where its collateral is.
+        // Even with its own key pinned, it does not refund to the accepter.
         config.lygos_funding_pubkey = dlc
-            .offerer_funding_pubkey
+            .accepter_funding_pubkey
             .as_deref()
             .expect("key")
             .parse()
             .expect("key");
         assert!(
-            attempt(&config).contains("refund locktime"),
+            attempt(&config).contains("refund to the accepter"),
             "{}",
             attempt(&config)
         );

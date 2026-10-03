@@ -367,6 +367,8 @@ fn compatibility_parse_failure(
 pub struct OfferAnnouncement {
     /// Chain hash the offer names.
     pub chain_hash: [u8; 32],
+    /// The offer's signed contract flags, which select the refund layout.
+    pub contract_flags: u8,
     /// The announcement as the offer serializes it.
     pub bytes: Vec<u8>,
     /// Oracle event id.
@@ -398,6 +400,7 @@ pub fn offer_announcement(offer_hex: &str) -> Result<OfferAnnouncement, VerifyEr
     };
     Ok(OfferAnnouncement {
         chain_hash: offer.chain_hash,
+        contract_flags: offer.contract_flags,
         bytes: announcement.encode(),
         event_id: announcement.oracle_event.event_id.clone(),
         outcomes: descriptor.outcomes.clone(),
