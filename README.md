@@ -76,7 +76,7 @@ An empty `qosCommit` records the value actually committed by the current QOS man
 - `GET /health` — liveness.
 - `POST /v1/attest` — DLC transcript, lock proof, and loan terms in; signed receipt out, or `422` with the reason for refusal.
 
-Everything the attester pins is a launch argument, so the QOS manifest measures it: `--network`, `--lygos-funding-pubkey`, `--oracle-pubkey`. Any network other than mainnet is refused unless `--allow-insecure-network` is also passed, because its proof of work is free to forge. Egress stays disabled; a relayer supplies the headers and Merkle proof. A Midnight DLC must refund to the accepter (contract flag `0x01`) with Lygos as the accepter, so the refund pays the Lygos side; anything else is refused.
+Everything the attester pins is a launch argument, so the QOS manifest measures it: `--network`, `--lygos-funding-pubkey`, `--oracle-pubkey`, `--min-confirmations` (default 6). Any network other than mainnet is refused unless `--allow-insecure-network` is also passed, because its proof of work is free to forge. The SPV check proves that work was done on a chain containing the funding transaction, not that the chain is Bitcoin's, so `--min-confirmations` is the enclave's own floor on what a forged lock costs; the `Verifier` contract may require more, never less. Egress stays disabled; a relayer supplies the headers and Merkle proof. A Midnight DLC must refund to the accepter (contract flag `0x01`) with Lygos as the accepter, so the refund pays the Lygos side; anything else is refused.
 
 Build the image with `make out/mint-attester/index.json`. CI publishes it as `ghcr.io/lygoslabs/mint-attester` and prints the image digest and executable digest.
 

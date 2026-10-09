@@ -43,6 +43,10 @@ pub struct Config {
     pub key: SigningKey,
     /// Sign receipts for a network whose proof of work is free to forge. Test deployments only.
     pub allow_insecure_network: bool,
+    /// Fewest headers that must confirm the funding block before a receipt is signed. The SPV
+    /// check proves work, not membership in the real chain, so this is the enclave's own floor on
+    /// how much work a forged lock costs; the `Verifier` contract may require more.
+    pub min_confirmations: u32,
 }
 
 /// Body of `POST /v1/attest`. Hex throughout; EVM values may carry a `0x` prefix.
@@ -207,6 +211,12 @@ pub fn receipt_for(
     }
     if &announcement.chain_hash != config.network.chain_hash().as_bytes() {
         return Err("the DLC is for another Bitcoin network".to_owned());
+    }
+    if lock.confirmations < config.min_confirmations {
+        return Err(format!(
+            "the funding transaction has {} confirmation(s); at least {} are required",
+            lock.confirmations, config.min_confirmations
+        ));
     }
 
     let lygos_key = config.lygos_funding_pubkey.to_string();
@@ -468,6 +478,7 @@ mod tests {
             oracle_pubkey: ORACLE.parse().expect("key"),
             key: SigningKey::from_slice(&[7; 32]).expect("key"),
             allow_insecure_network: false,
+            min_confirmations: 1,
         }
     }
 
@@ -614,6 +625,16 @@ mod tests {
                 .contains("refund locktime")
         );
         assert!(refused(|_, t, _| t.chain_id = 1).contains("another chain"));
+        assert!(refused(|_, _, l| l.confirmations = 0).contains("confirmation"));
+        let strict = Config {
+            min_confirmations: 6,
+            ..config()
+        };
+        assert!(
+            receipt_for(&strict, &dlc(), &announcement(&terms()), &lock(), &terms())
+                .expect_err("one confirmation is below the floor")
+                .contains("at least 6")
+        );
         assert!(refused(|_, t, _| t.controller = [0xbd; 20]).contains("event id"));
         assert!(refused(|_, t, _| t.originator = [0xbd; 20]).contains("event id"));
         assert!(refused(|_, t, _| t.mint_deadline += 1).contains("event id"));

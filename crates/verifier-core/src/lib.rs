@@ -276,6 +276,18 @@ fn validate_enumerated_oracle_event(
 }
 
 fn validate_contract_maturity(offer: &OfferDlc, event_maturity_epoch: u32) -> Result<(), String> {
+    // The maturity is a Unix time, so the locktimes compared with it must be Unix
+    // times too. A block-height CET locktime is numerically below every
+    // timestamp and would otherwise pass as "before maturity" while locking
+    // every CET for years.
+    if offer.cet_locktime < bitcoin::absolute::LOCK_TIME_THRESHOLD
+        || offer.refund_locktime < bitcoin::absolute::LOCK_TIME_THRESHOLD
+    {
+        return Err(format!(
+            "CET locktime {} and refund locktime {} must be Unix times to compare with oracle event maturity {event_maturity_epoch}",
+            offer.cet_locktime, offer.refund_locktime
+        ));
+    }
     if offer.cet_locktime > event_maturity_epoch {
         return Err(format!(
             "CET locktime {} is after oracle event maturity {event_maturity_epoch}",
@@ -1135,18 +1147,29 @@ mod tests {
             change_serial_id: 1,
             fund_output_serial_id: 2,
             fee_rate_per_vb: 1,
-            cet_locktime: 10,
-            refund_locktime: 30,
+            cet_locktime: 1_700_000_010,
+            refund_locktime: 1_700_000_030,
             tlvs: Default::default(),
         };
-        assert!(validate_contract_maturity(&offer, 20).is_ok());
+        let maturity = 1_700_000_020;
+        assert!(validate_contract_maturity(&offer, maturity).is_ok());
 
-        offer.cet_locktime = 21;
-        assert!(validate_contract_maturity(&offer, 20).is_err());
+        offer.cet_locktime = 1_700_000_021;
+        assert!(validate_contract_maturity(&offer, maturity).is_err());
 
-        offer.cet_locktime = 10;
-        offer.refund_locktime = 20;
-        assert!(validate_contract_maturity(&offer, 20).is_err());
+        offer.cet_locktime = 1_700_000_010;
+        offer.refund_locktime = 1_700_000_020;
+        assert!(validate_contract_maturity(&offer, maturity).is_err());
+
+        // A block height is below every Unix time; it must not pass as "before maturity".
+        offer.cet_locktime = 1_000_000;
+        offer.refund_locktime = 1_700_000_030;
+        let error = validate_contract_maturity(&offer, maturity).expect_err("height locktime");
+        assert!(error.contains("must be Unix times"), "{error}");
+
+        offer.cet_locktime = 1_700_000_010;
+        offer.refund_locktime = 1_000_100;
+        assert!(validate_contract_maturity(&offer, maturity).is_err());
     }
 
     #[test]

@@ -32,6 +32,9 @@ struct Cli {
     /// Sign receipts on a network other than mainnet, whose proof of work is free to forge.
     #[arg(long, default_value_t = false)]
     allow_insecure_network: bool,
+    /// Fewest headers that must confirm the funding block before a receipt is signed.
+    #[arg(long, default_value_t = 6)]
+    min_confirmations: u32,
 }
 
 #[tokio::main]
@@ -51,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         oracle_pubkey: cli.oracle_pubkey,
         key: quorum_key.signing_key().clone(),
         allow_insecure_network: cli.allow_insecure_network,
+        min_confirmations: cli.min_confirmations,
     });
 
     let address = format!("{}:{}", cli.host, cli.port);
