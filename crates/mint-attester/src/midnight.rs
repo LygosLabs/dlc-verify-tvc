@@ -104,7 +104,8 @@ fn is_address(value: &str) -> bool {
 }
 
 /// The Midnight oracle event id as the receipt carries it: the SHA-256 digest alone. The
-/// announcement names the event `"midnight-"` followed by this digest in lowercase hex.
+/// announcement names the event `"midnight-"`, the maturity label, `"-"`, then this digest in
+/// lowercase hex (see [`event_name`]).
 ///
 /// Terms are canonical strings joined with `//`: decimal integers, lowercase `0x` hex for EVM
 /// values, lowercase hex for the compressed funding key, and liquidators joined with `,`.
@@ -135,6 +136,38 @@ pub fn event_id(
     ]
     .join("//");
     Sha256::digest(preimage.as_bytes()).into()
+}
+
+/// The announcement's event name: `midnight-<DDMMMYY>-<digest hex>`, e.g.
+/// `midnight-25DEC26-…`. The date is a label, not a hashed term: `market_id` already binds
+/// the maturity and the enclave rebuilds the whole name from the market it read.
+#[must_use]
+pub fn event_name(maturity: u64, event_id: &[u8; 32]) -> String {
+    format!(
+        "midnight-{}-{}",
+        maturity_label(maturity),
+        hex::encode(event_id)
+    )
+}
+
+/// The market maturity as a UTC date in option-expiry style, uppercase, no separators.
+fn maturity_label(maturity: u64) -> String {
+    // ponytail: Howard Hinnant's civil-from-days; no chrono for one date format
+    let z = i64::try_from(maturity / 86_400).unwrap_or(i64::MAX / 2) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    const MONTHS: [&str; 12] = [
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    ];
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // 1..=12 by construction
+    let month_name = MONTHS[(month - 1) as usize];
+    format!("{day:02}{month_name}{:02}", year.rem_euclid(100))
 }
 
 /// Everything `termsHash` commits to.
@@ -209,6 +242,23 @@ mod tests {
             hex::encode(id),
             "b4dd4ab6fe359956fa26f845f1881f61772d82a502b25049f1cc60e8486951e1"
         );
+    }
+
+    /// The quarter ends from lygos-contracts `test/fixtures/quarter_vectors.json` plus the
+    /// midnight boundary; the oracle's `TestMaturityLabel` pins the same table.
+    #[test]
+    fn maturity_label_is_pinned() {
+        for (maturity, label) in [
+            (1_798_210_800, "25DEC26"),
+            (1_806_073_200, "26MAR27"),
+            (1_813_935_600, "25JUN27"),
+            (1_821_798_000, "24SEP27"),
+            (1_798_156_800, "25DEC26"),
+            (1_798_156_799, "24DEC26"),
+        ] {
+            assert_eq!(maturity_label(maturity), label, "{maturity}");
+        }
+        assert!(event_name(1_798_210_800, &[0xab; 32]).starts_with("midnight-25DEC26-abab"));
     }
 
     #[test]

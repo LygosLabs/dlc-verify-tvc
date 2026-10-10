@@ -259,7 +259,7 @@ pub fn receipt_for(
         terms.mint_deadline,
         terms.announced_at,
     );
-    if announcement.event_id != format!("midnight-{}", hex::encode(event_id)) {
+    if announcement.event_id != midnight::event_name(market.maturity, &event_id) {
         return Err("the announcement's event id does not commit to these terms".to_owned());
     }
 
@@ -519,7 +519,7 @@ mod tests {
         );
         OfferAnnouncement {
             bytes: vec![9; 100],
-            event_id: format!("midnight-{}", hex::encode(event_id)),
+            event_id: midnight::event_name(market.maturity, &event_id),
             chain_hash: *Network::Bitcoin.chain_hash().as_bytes(),
             contract_flags: REFUND_TO_ACCEPTER_FLAG,
             outcomes: ["not-minted", "released", LIQUIDATOR]

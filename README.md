@@ -87,7 +87,7 @@ Deployment, from `tvc-configs/*.mint-attester.example.json`:
    tvc keys init-local-quorum-key -o <dir>/quorum_key.json
    tvc keys generate-local-quorum-key -c <dir>/quorum_key.json --quorum-key-metadata-out <dir>/quorum_key_metadata.json
    ```
-2. Put the quorum public key and the three operator keys in the app config, then `tvc app create --config-file <app config>`.
+2. Put the quorum public key and the three operator keys in the app config, then `tvc app create --config-file <app config>`. With your own quorum key the config must also declare `shareSetParams` (`name`, `threshold`, `newOperators`, `existingOperatorIds`) listing the operators holding shares; a null share set selects Turnkey's shared default key and provisioning fails with "not part of the manifest share set". Apps cannot be edited afterwards and deleted app names stay reserved. `tvc-configs/*.mint-attester.testnet4.json` is the live testnet4 example.
 3. Put the app id, image digest, executable digest, and pinned keys in the deploy config, then `tvc deploy create --config-file <deploy config>`.
 4. Two operators approve the manifest: `tvc deploy approve`.
 5. Two operators provision the key. Each runs `tvc deploy provisioning-details`, `tvc keys re-encrypt-local-share`, and `tvc deploy post-share`.

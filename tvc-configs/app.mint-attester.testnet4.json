@@ -1,0 +1,28 @@
+{
+  "name": "mint-attester-testnet4",
+  "quorumPublicKey": "04ea976ac00e4334036813e52a8cf474b533f7819bf1555011f56844c085bee52d168a86ba83eb8f896957eee4841d92d72fe33b613d010d6ab6b74181b42383a204dcbb5539a883ac646dc41d9256e25bee9757910599e5471cfcb95454930793a5e015d7d71096f66606a31beb0b93ad61e56b7991a75108e8e205af8c9a2e71b6",
+  "enableEgress": false,
+  "manifestSetId": null,
+  "manifestSetParams": {
+    "name": "lygos-mint-attester-testnet4-operators",
+    "threshold": 2,
+    "newOperators": [],
+    "existingOperatorIds": [
+      "d0d1ad98-7970-449f-b7ac-1ecc816671d9",
+      "ed751db2-97a3-44a3-a7ec-b1182c5bcbdf",
+      "72f46145-99ee-44af-9d5f-21dba7d532de"
+    ]
+  },
+  "shareSetId": null,
+  "shareSetParams": {
+    "name": "lygos-mint-attester-testnet4-shares",
+    "threshold": 2,
+    "newOperators": [],
+    "existingOperatorIds": [
+      "d0d1ad98-7970-449f-b7ac-1ecc816671d9",
+      "ed751db2-97a3-44a3-a7ec-b1182c5bcbdf",
+      "72f46145-99ee-44af-9d5f-21dba7d532de"
+    ]
+  },
+  "dangerousEnableDebugModeDeployments": false
+}
