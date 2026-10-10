@@ -1,7 +1,7 @@
 {
   "appId": "d75cce18-74a1-44e0-9aac-c4b5f9dc5208",
   "qosVersion": "0.12.1",
-  "pivotContainerImageUrl": "ghcr.io/lygoslabs/mint-attester@sha256:4aaa212e6e98735e1caa39e38b146f35f8220c94e4cc2e70f2259a96180c12a4",
+  "pivotContainerImageUrl": "ghcr.io/lygoslabs/mint-attester@sha256:99b165bd9ac1516cd59d19f193777b1593798f9b1135f44f0ad731841821d823",
   "pivotPath": "/tvc_app",
   "pivotArgs": [
     "--host", "0.0.0.0",
@@ -11,7 +11,7 @@
     "--lygos-funding-pubkey", "02795ae20a3f833c6b6fdb8f031a5ad69b1bfdf1e5e5fe4f67a9c04c7d6b109ca8",
     "--oracle-pubkey", "03e40252588ea11d87d1e7afc8df27954ea1dd8a52f201a281caef4678f65887"
   ],
-  "expectedPivotDigest": "6a2473179a43526ffec9adc5c68f9ca11bd2841fef687dc2474876bf8e8898d2",
+  "expectedPivotDigest": "b7b92e70f0d3e82bc9829d9abba8f2cc9659d4f9e7088e14497c5162e1579828",
   "dangerousDeployDebugMode": false,
   "healthCheckType": "TVC_HEALTH_CHECK_TYPE_HTTP",
   "healthCheckPort": 3000,
