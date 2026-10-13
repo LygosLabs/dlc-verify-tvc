@@ -1,6 +1,6 @@
 {
   "name": "mint-attester-staging",
-  "quorumPublicKey": "REPLACE_WITH_STAGING_QUORUM_PUBLIC_KEY",
+  "quorumPublicKey": "04404e0ac97f28b7a54a6f20b909f033ad2fb2e577a31d91b94772de8722409a296ba1592dc9961dfebb204e2e6a53155c83e7ecb95251a0ea7eaae8b7cefbd8b004acbb56dd46d13f9b35e3c6932eb39cc4df761a27ddb778a24861e9f946abcf1c34d20f461cfecddc8d46fe70e46c73e5f984d850f42d531dc6fb9d1d2c2959fa",
   "enableEgress": false,
   "manifestSetId": null,
   "manifestSetParams": {
