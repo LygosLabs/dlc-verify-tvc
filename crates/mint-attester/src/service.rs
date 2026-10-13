@@ -368,6 +368,8 @@ pub fn parse_network(name: &str) -> Result<Network, String> {
         "mainnet" => Ok(Network::Bitcoin),
         "testnet" => Ok(Network::Testnet),
         "testnet4" => Ok(Network::Testnet4),
+        // Mutinynet is a custom signet: same genesis block and chain hash, its own block signers.
+        "signet" | "mutinynet" => Ok(Network::Signet),
         "regtest" => Ok(Network::Regtest),
         other => Err(format!("unsupported network {other:?}")),
     }
@@ -801,5 +803,13 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let response = app.oneshot(post("{")).await.expect("response");
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn mutinynet_is_signet_and_shares_its_chain_hash() {
+        assert_eq!(parse_network("mutinynet"), Ok(Network::Signet));
+        assert_eq!(parse_network("signet"), Ok(Network::Signet));
+        assert_eq!(network_name(Network::Signet), "testnet");
+        assert!(parse_network("liquid").is_err());
     }
 }

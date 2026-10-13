@@ -5,7 +5,8 @@ on:
     tags:
       - "v*.*.*"
     branches:
-      - "main"
+      - "dev"
+      - "master"
     paths:
       - ".github/**"
       - "Cargo.lock"
@@ -28,7 +29,7 @@ jobs:
     env:
       tags: >-
         sha-${{ github.sha }}
-        ${{ github.ref == format('refs/heads/{0}', 'main') && 'latest' || '' }}
+        ${{ github.ref == format('refs/heads/{0}', 'master') && 'latest' || '' }}
         ${{ github.event_name == 'push' && github.ref_name || '' }}
     strategy:
       matrix:
@@ -180,6 +181,9 @@ jobs:
           echo "- **Container Image URL**: \`${container_url}@${container_digest}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Executable path**: \`/tvc_app\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Expected Executable Digest**: \`${digest}\`" >> $GITHUB_STEP_SUMMARY
+          mkdir -p tvc-output
+          jq -n --arg image "${container_url}@${container_digest}" --arg digest "${digest}" \
+            '{containerImage: $image, executableSha256: $digest}' > tvc-output/${{ matrix.target.name }}.json
           # The release identity below describes the verifier only.
           if [ "${{ matrix.target.name }}" != "dlc-verify-tvc" ]; then exit 0; fi
           lock_digest=$(sha256sum Cargo.lock | awk '{print $1}')
@@ -207,6 +211,12 @@ jobs:
               deploymentIdentity: null,
               authorizationReady: false
             }' > release-output/release-manifest.json
+      - name: Upload TVC deployment details
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.target.name }}-tvc-${{ github.sha }}
+          path: tvc-output/${{ matrix.target.name }}.json
+          if-no-files-found: error
       - name: Upload release identity
         if: matrix.target.name == 'dlc-verify-tvc'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -214,3 +224,68 @@ jobs:
           name: ${{ matrix.target.name }}-release-identity-${{ github.sha }}
           path: release-output/release-manifest.json
           if-no-files-found: error
+
+  # Merging to dev rolls every dev enclave forward: the image is pinned by digest, the quorum key is
+  # the app's and does not change, so nothing on chain moves. Hosted operators approve and provision.
+  deploy-dev:
+    name: Deploy mint-attester to ${{ matrix.env }}
+    needs: images
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [testnet4, staging]
+    environment: ${{ matrix.env }}
+    env:
+      TVC_ORG_ID: ${{ secrets.TVC_ORG_ID }}
+      TVC_API_KEY_PUBLIC: ${{ secrets.TVC_API_KEY_PUBLIC }}
+      TVC_API_KEY_PRIVATE: ${{ secrets.TVC_API_KEY_PRIVATE }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install tvc
+        uses: ./.github/actions/tvc-setup
+      - name: Download TVC deployment details
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mint-attester-tvc-${{ github.sha }}
+          path: tvc-output
+      - name: Release
+        run: |
+          scripts/tvc-release.sh "${{ matrix.env }}" \
+            "$(jq -r .containerImage tvc-output/mint-attester.json)" \
+            "$(jq -r .executableSha256 tvc-output/mint-attester.json)"
+
+  # Merging to master only creates the mainnet deployment. Two YubiKey operators approve it by hand.
+  deploy-mainnet:
+    name: Create mainnet mint-attester deployment
+    needs: images
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    environment: production
+    env:
+      TVC_ORG_ID: ${{ secrets.TVC_ORG_ID }}
+      TVC_API_KEY_PUBLIC: ${{ secrets.TVC_API_KEY_PUBLIC }}
+      TVC_API_KEY_PRIVATE: ${{ secrets.TVC_API_KEY_PRIVATE }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install tvc
+        uses: ./.github/actions/tvc-setup
+      - name: Download TVC deployment details
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mint-attester-tvc-${{ github.sha }}
+          path: tvc-output
+      - name: Create deployment
+        run: |
+          scripts/tvc-release.sh mainnet \
+            "$(jq -r .containerImage tvc-output/mint-attester.json)" \
+            "$(jq -r .executableSha256 tvc-output/mint-attester.json)"

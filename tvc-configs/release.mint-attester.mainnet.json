@@ -1,0 +1,4 @@
+{
+  "deployConfig": "tvc-configs/deploy.mint-attester.mainnet.json",
+  "autoLive": false
+}

@@ -1,0 +1,28 @@
+{
+  "name": "mint-attester-staging",
+  "quorumPublicKey": "REPLACE_WITH_STAGING_QUORUM_PUBLIC_KEY",
+  "enableEgress": false,
+  "manifestSetId": null,
+  "manifestSetParams": {
+    "name": "lygos-mint-attester-staging-operators",
+    "threshold": 2,
+    "newOperators": [],
+    "existingOperatorIds": [
+      "d0d1ad98-7970-449f-b7ac-1ecc816671d9",
+      "ed751db2-97a3-44a3-a7ec-b1182c5bcbdf",
+      "72f46145-99ee-44af-9d5f-21dba7d532de"
+    ]
+  },
+  "shareSetId": null,
+  "shareSetParams": {
+    "name": "lygos-mint-attester-staging-shares",
+    "threshold": 2,
+    "newOperators": [],
+    "existingOperatorIds": [
+      "d0d1ad98-7970-449f-b7ac-1ecc816671d9",
+      "ed751db2-97a3-44a3-a7ec-b1182c5bcbdf",
+      "72f46145-99ee-44af-9d5f-21dba7d532de"
+    ]
+  },
+  "dangerousEnableDebugModeDeployments": false
+}

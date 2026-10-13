@@ -1,0 +1,23 @@
+name: "Install tvc"
+description: "Install the Turnkey tvc CLI from the pinned tkhq/rust-sdk release"
+inputs:
+  version:
+    description: "tvc release version"
+    default: "0.16.0"
+  sha256:
+    description: "SHA-256 of tvc-x86_64-unknown-linux-musl.tar.gz for that version"
+    default: "fe59464bdf8377470d611bb8eb56f4f4a7692723af5d6aac7177092699359ff4"
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        url="https://github.com/tkhq/rust-sdk/releases/download/tvc-v${{ inputs.version }}/tvc-x86_64-unknown-linux-musl.tar.gz"
+        curl --fail --silent --location "${url}" -o "${RUNNER_TEMP}/tvc.tar.gz"
+        echo "${{ inputs.sha256 }}  ${RUNNER_TEMP}/tvc.tar.gz" | sha256sum --check
+        mkdir -p "${RUNNER_TEMP}/tvc"
+        tar -xzf "${RUNNER_TEMP}/tvc.tar.gz" -C "${RUNNER_TEMP}/tvc"
+        tvc_bin=$(find "${RUNNER_TEMP}/tvc" -type f -name tvc | head -1)
+        install -m 0755 "${tvc_bin}" /usr/local/bin/tvc
+        tvc --help >/dev/null

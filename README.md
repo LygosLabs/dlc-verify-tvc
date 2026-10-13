@@ -80,20 +80,40 @@ Everything the attester pins is a launch argument, so the QOS manifest measures 
 
 Build the image with `make out/mint-attester/index.json`. CI publishes it as `ghcr.io/lygoslabs/mint-attester` and prints the image digest and executable digest.
 
-Deployment, from `tvc-configs/*.mint-attester.example.json`:
+### Environments and branches
 
-1. Generate the quorum key, split 2-of-3 to the YubiKey operators. Write both files outside the repository; the metadata file holds the encrypted shares.
+| Branch | Environment | Bitcoin network | TVC app config | Release config | Who approves |
+|---|---|---|---|---|---|
+| `dev` | staging | mutinynet (signet) | `app.mint-attester.staging.json` | `release.mint-attester.staging.json` | hosted operators, automatic |
+| `dev` | testnet4 | testnet4 | `app.mint-attester.testnet4.json` | `release.mint-attester.testnet4.json` | hosted operators, automatic |
+| `master` | production | mainnet | `app.mint-attester.mainnet.json` | `release.mint-attester.mainnet.json` | two YubiKey operators, by hand |
+
+Each environment is one TVC app, created once. The app owns the quorum key, so a new deployment under the same app signs with the same key and the `Verifier` contract pinned to it never changes. The 24-hour timelock in `lygos-contracts` applies only when a key changes, which means a new app and a new `Verifier`. Enclave code on mainnet is governed by the app's 2-of-3 manifest set instead: whoever holds two operator keys can ship code that signs with the mainnet key, so those keys stay on YubiKeys held by separate people and every mainnet release is announced with its image digest.
+
+### Every merge
+
+`.github/workflows/stagex.yml` builds the reproducible image, pushes it to GHCR, then runs `scripts/tvc-release.sh` for each environment of the branch:
+
+1. `tvc deploy create` from the environment's deploy config, with the image and executable digests overridden by the ones just built. The config file is a template and is not committed back.
+2. On `dev`: the two hosted operators in the release config approve the manifest and provision their shares, the deployment is set live, `/health` is checked, and the previous deployment is deleted (restorable with `tvc deploy restore`).
+3. On `master`: stop after step 1. The job summary prints the deployment and manifest ids. Two operators then run `tvc deploy approve --deploy-id <id> --serial <yubikey serial>`, provision, and one runs `tvc app set-live-deploy`.
+
+CI authenticates with `TVC_ORG_ID`, `TVC_API_KEY_PUBLIC`, and `TVC_API_KEY_PRIVATE` from the GitHub environment of the same name. The production key only needs permission to create deployments.
+
+A release that changes the receipt format needs a new `Verifier` first: deploy it, queue the pointer change, execute after the timelock, then merge to `master` and set the new deployment live.
+
+### Creating an environment
+
+Once per environment, from `tvc-configs/*.mint-attester.example.json`:
+
+1. Generate the quorum key, split 2-of-3 to the operators. Write both files outside the repository; the metadata file holds the encrypted shares.
    ```bash
    tvc keys init-local-quorum-key -o <dir>/quorum_key.json
    tvc keys generate-local-quorum-key -c <dir>/quorum_key.json --quorum-key-metadata-out <dir>/quorum_key_metadata.json
    ```
-2. Put the quorum public key and the three operator keys in the app config, then `tvc app create --config-file <app config>`. With your own quorum key the config must also declare `shareSetParams` (`name`, `threshold`, `newOperators`, `existingOperatorIds`) listing the operators holding shares; a null share set selects Turnkey's shared default key and provisioning fails with "not part of the manifest share set". Apps cannot be edited afterwards and deleted app names stay reserved. `tvc-configs/*.mint-attester.testnet4.json` is the live testnet4 example.
-3. Put the app id, image digest, executable digest, and pinned keys in the deploy config, then `tvc deploy create --config-file <deploy config>`.
-4. Two operators approve the manifest: `tvc deploy approve`.
-5. Two operators provision the key. Each runs `tvc deploy provisioning-details`, `tvc keys re-encrypt-local-share`, and `tvc deploy post-share`.
-6. `tvc app set-live-deploy`, then check `/health` on the app's `publicDomain`.
-
-Steps 4 and 5 repeat for every new deployment, so an upgrade needs two operators present.
+2. Put the quorum public key and the three operators in the app config, then `tvc app create --config-file <app config>`. With your own quorum key the config must also declare `shareSetParams` (`name`, `threshold`, `newOperators`, `existingOperatorIds`) listing the operators holding shares; a null share set selects Turnkey's shared default key and provisioning fails with "not part of the manifest share set". Apps cannot be edited afterwards and deleted app names stay reserved.
+3. Put the app id and pinned keys in the deploy config and the operator ids in the release config. Replace every `REPLACE_WITH_` placeholder; the release script skips an environment whose deploy config still has one.
+4. Give the `Verifier` for that environment the app's quorum key, then merge to the branch, or run `scripts/tvc-release.sh <env> <image> <digest>` locally.
 
 The `Verifier` constructor takes the signing half of the quorum public key: the second 65-byte SEC1 point of the 130-byte key, as `signerX` and `signerY`.
 

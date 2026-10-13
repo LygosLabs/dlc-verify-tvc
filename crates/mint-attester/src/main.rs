@@ -20,7 +20,7 @@ struct Cli {
     /// QOS-managed quorum key; its signing half is the `Verifier` contract's signer.
     #[arg(long, default_value = qos_core::QUORUM_FILE)]
     quorum_file: String,
-    /// Bitcoin network: mainnet, testnet, testnet4, or regtest.
+    /// Bitcoin network: mainnet, testnet, testnet4, signet (alias mutinynet), or regtest.
     #[arg(long, default_value = "mainnet", value_parser = parse_network)]
     network: bitcoin::Network,
     /// The Midnight Lygos funding key, compressed hex.

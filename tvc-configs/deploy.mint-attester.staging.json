@@ -1,0 +1,19 @@
+{
+  "appId": "REPLACE_WITH_STAGING_APP_ID",
+  "qosVersion": "0.12.1",
+  "pivotContainerImageUrl": "ghcr.io/lygoslabs/mint-attester@sha256:99b165bd9ac1516cd59d19f193777b1593798f9b1135f44f0ad731841821d823",
+  "pivotPath": "/tvc_app",
+  "pivotArgs": [
+    "--host", "0.0.0.0",
+    "--port", "3000",
+    "--network", "mutinynet",
+    "--allow-insecure-network",
+    "--lygos-funding-pubkey", "REPLACE_WITH_STAGING_MIDNIGHT_FUNDING_PUBKEY",
+    "--oracle-pubkey", "03e40252588ea11d87d1e7afc8df27954ea1dd8a52f201a281caef4678f65887"
+  ],
+  "expectedPivotDigest": "b7b92e70f0d3e82bc9829d9abba8f2cc9659d4f9e7088e14497c5162e1579828",
+  "dangerousDeployDebugMode": false,
+  "healthCheckType": "TVC_HEALTH_CHECK_TYPE_HTTP",
+  "healthCheckPort": 3000,
+  "publicIngressPort": 3000
+}
