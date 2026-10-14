@@ -95,7 +95,7 @@ Each environment is one TVC app, created once. The app owns the quorum key, so a
 `.github/workflows/stagex.yml` builds the reproducible image, pushes it to GHCR, then runs `scripts/tvc-release.sh` for each environment of the branch:
 
 1. `tvc deploy create` from the environment's deploy config, with the image and executable digests overridden by the ones just built. The config file is a template and is not committed back.
-2. On `dev`: the two hosted operators in the release config approve the manifest and provision their shares, the deployment is set live, `/health` is checked, and the previous deployment is deleted (restorable with `tvc deploy restore`).
+2. On `dev`: the two hosted operators in the release config approve the manifest and provision their shares, the deployment is set live once all three replicas are ready, `/health` is checked and the previous deployment is re-targeted if it fails, otherwise the previous deployment is deleted (restorable with `tvc deploy restore`).
 3. On `master`: stop after step 1. The job summary prints the deployment and manifest ids. Two operators then run `tvc deploy approve --deploy-id <id> --serial <yubikey serial>`, provision, and one runs `tvc app set-live-deploy`.
 
 CI authenticates with `TVC_ORG_ID`, `TVC_API_KEY_PUBLIC`, and `TVC_API_KEY_PRIVATE` from the GitHub environment of the same name. The production key only needs permission to create deployments.

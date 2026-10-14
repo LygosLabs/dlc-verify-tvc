@@ -81,18 +81,41 @@ for op in $(jq -r '.provisioners[]' "${release_cfg}"); do
   done
 done
 
-tvc_json app set-live-deploy --deploy-id "${deploy_id}" >/dev/null
-echo "live deployment set to ${deploy_id}"
+# Only switch traffic once every replica of the new deployment is up; an unhealthy enclave must
+# never become live. The public health endpoint reflects the live deployment, so it is checked
+# after the switch and the previous deployment is re-targeted if it fails.
+replicas() {
+  tvc_json app status --app-id "${app_id}" \
+    | jq -r --arg id "${deploy_id}" '.deployments[] | select(.deploymentId == $id) | "\(.replicas.ready)/\(.replicas.desired)"'
+}
 
 for attempt in $(seq 1 60); do
-  ready=$(tvc_json app status --app-id "${app_id}" \
-    | jq -r --arg id "${deploy_id}" '.deployments[] | select(.deploymentId == $id) | "\(.replicas.ready)/\(.replicas.desired)"')
-  if [ "${ready}" = "3/3" ] && curl --fail --silent --max-time 10 "${health_url}" >/dev/null; then
-    echo "${deploy_id} healthy (${ready}), ${health_url} ok"
+  ready=$(replicas)
+  if [ "${ready}" = "3/3" ]; then
+    echo "${deploy_id} replicas ready (${ready})"
     break
   fi
   if [ "${attempt}" -eq 60 ]; then
-    echo "${deploy_id} not healthy after 10 minutes (replicas ${ready:-none}); previous ${previous:-none} left in place"
+    echo "${deploy_id} replicas not ready after 10 minutes (${ready:-none}); live deployment ${previous:-none} untouched"
+    exit 1
+  fi
+  sleep 10
+done
+
+tvc_json app set-live-deploy --deploy-id "${deploy_id}" >/dev/null
+echo "live deployment set to ${deploy_id}"
+
+for attempt in $(seq 1 12); do
+  if curl --fail --silent --max-time 10 "${health_url}" >/dev/null; then
+    echo "${health_url} ok"
+    break
+  fi
+  if [ "${attempt}" -eq 12 ]; then
+    echo "${health_url} not healthy 2 minutes after switching to ${deploy_id}"
+    if [ -n "${previous}" ] && [ "${previous}" != "${deploy_id}" ]; then
+      tvc_json app set-live-deploy --deploy-id "${previous}" >/dev/null
+      echo "rolled live deployment back to ${previous}; ${deploy_id} left for inspection"
+    fi
     exit 1
   fi
   sleep 10
