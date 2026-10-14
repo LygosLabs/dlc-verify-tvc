@@ -90,7 +90,7 @@ replicas() {
 }
 
 for attempt in $(seq 1 60); do
-  ready=$(replicas)
+  ready=$(replicas) || ready=""
   if [ "${ready}" = "3/3" ]; then
     echo "${deploy_id} replicas ready (${ready})"
     break
@@ -115,6 +115,8 @@ for attempt in $(seq 1 12); do
     if [ -n "${previous}" ] && [ "${previous}" != "${deploy_id}" ]; then
       tvc_json app set-live-deploy --deploy-id "${previous}" >/dev/null
       echo "rolled live deployment back to ${previous}; ${deploy_id} left for inspection"
+    else
+      echo "::warning::no previous deployment to roll back to; ${deploy_id} is still live and needs manual attention"
     fi
     exit 1
   fi
