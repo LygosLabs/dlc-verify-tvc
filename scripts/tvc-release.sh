@@ -26,6 +26,11 @@ if grep -q 'REPLACE_WITH' "${deploy_cfg}"; then
   exit 0
 fi
 
+if [ -z "${TVC_ORG_ID:-}" ] && [ ! -d "${HOME}/.config/turnkey" ]; then
+  echo "::error::no Turnkey credentials: set TVC_ORG_ID, TVC_API_KEY_PUBLIC and TVC_API_KEY_PRIVATE on the ${env_name} GitHub environment"
+  exit 1
+fi
+
 tvc_json() { tvc "$@" --non-interactive --message-format json; }
 
 previous=$(tvc_json app status --app-id "${app_id}" | jq -r '.targetedDeploymentId // empty')
