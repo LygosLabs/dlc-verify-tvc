@@ -1,0 +1,6 @@
+# Enclave code and every TVC config need a second pair of eyes from the people who hold operator keys.
+*                     @matthewjablack
+crates/               @matthewjablack @jay-lygos
+tvc-configs/          @matthewjablack @jay-lygos
+scripts/              @matthewjablack @jay-lygos
+.github/              @matthewjablack @jay-lygos

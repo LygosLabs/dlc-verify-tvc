@@ -1,0 +1,12 @@
+{
+  "deployConfig": "tvc-configs/deploy.mint-attester.staging.json",
+  "autoLive": true,
+  "approvers": [
+    "d0d1ad98-7970-449f-b7ac-1ecc816671d9",
+    "ed751db2-97a3-44a3-a7ec-b1182c5bcbdf"
+  ],
+  "provisioners": [
+    "d0d1ad98-7970-449f-b7ac-1ecc816671d9",
+    "ed751db2-97a3-44a3-a7ec-b1182c5bcbdf"
+  ]
+}
