@@ -15,6 +15,8 @@ on:
       - "images/**"
       - "Makefile"
       - "rust-toolchain.toml"
+      - "scripts/tvc-release.sh"
+      - "tvc-configs/**"
   workflow_dispatch: # Allows manual invocation
 
 jobs:
