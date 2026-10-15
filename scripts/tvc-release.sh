@@ -31,11 +31,14 @@ fi
 if [ -n "${TVC_ORG_ID:-}" ]; then
   : "${TVC_API_KEY_PUBLIC:?set with TVC_ORG_ID}" "${TVC_API_KEY_PRIVATE:?set with TVC_ORG_ID}"
   tk_dir="${HOME}/.config/turnkey"
-  key_path="${tk_dir}/orgs/Lygos/api_key.json"
-  (umask 077 && mkdir -p "${tk_dir}/orgs/Lygos" \
-    && jq -n --arg p "${TVC_API_KEY_PUBLIC}" --arg s "${TVC_API_KEY_PRIVATE}" \
-         '{public_key: $p, private_key: $s, curve: "p256"}' >"${key_path}" \
-    && sed "s|__API_KEY_PATH__|${key_path}|" tvc-configs/tvc.config.ci.toml >"${tk_dir}/tvc.config.toml")
+  key_path="${tk_dir}/orgs/ci/api_key.json"
+  # Remove the materialized key however the script exits. Secrets are read by jq from the
+  # environment, never passed as arguments, so they do not appear in /proc/*/cmdline.
+  trap 'rm -f "${key_path}"' EXIT
+  (umask 077 && mkdir -p "${tk_dir}/orgs/ci" \
+    && jq -n '{public_key: env.TVC_API_KEY_PUBLIC, private_key: env.TVC_API_KEY_PRIVATE, curve: "p256"}' >"${key_path}" \
+    && sed -e "s|__API_KEY_PATH__|${key_path}|" -e "s|__ORG_ID__|${TVC_ORG_ID}|" \
+         tvc-configs/tvc.config.ci.toml >"${tk_dir}/tvc.config.toml")
   unset TVC_ORG_ID TVC_API_KEY_PUBLIC TVC_API_KEY_PRIVATE
 elif [ ! -f "${HOME}/.config/turnkey/tvc.config.toml" ]; then
   echo "::error::no Turnkey credentials: run tvc login, or set TVC_ORG_ID, TVC_API_KEY_PUBLIC and TVC_API_KEY_PRIVATE on the ${env_name} GitHub environment"
