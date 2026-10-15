@@ -1,0 +1,39 @@
+# Turnkey CLI config used by CI. Everything here is public: operator ids, wallet ids, and the
+# hosted operators' public keys. scripts/tvc-release.sh fills __API_KEY_PATH__ at run time from the
+# TVC_* secrets. Hosted operators must be listed here for `tvc deploy approve --operator-id` to work;
+# env-var auth alone cannot load them.
+version = 1
+active_org = "Lygos"
+
+[orgs.Lygos]
+id = "675c7655-25d5-4bb9-8071-b6124a3dcafe"
+api_key_path = "__API_KEY_PATH__"
+api_base_url = "https://api.turnkey.com"
+default_operator_kind = "hosted"
+
+[[orgs.Lygos.operators]]
+name = "lygos-mint-attester-dev"
+kind = "hosted"
+operator_id = "d0d1ad98-7970-449f-b7ac-1ecc816671d9"
+wallet_id = "2c9db227-f845-57e0-9542-65fc2d030606"
+path = "m/5527107'/0'/0'"
+encrypt_public_key = "0457b81bdb20759e9c3c8c292f2efd4331beeec2095c06e3838b27d7b1cef8b0314bbae68e1d139899d8668e398b2fdba0504337fd036d30a4a5640af59885412c"
+sign_public_key = "04f8d24e7761d3dcf6fbbd262c4708875923beecc416b2969c05025b475e4914b6517d7bcb3f23a79fe82f8579fa711dd583b552cad9cf69bb9a99ebe2fb63110d"
+
+[[orgs.Lygos.operators]]
+name = "mint-attester-testnet4-op-2"
+kind = "hosted"
+operator_id = "ed751db2-97a3-44a3-a7ec-b1182c5bcbdf"
+wallet_id = "98b51443-89d3-5e6a-8c1d-d6dc6d2f1f9f"
+path = "m/5527107'/0'/0'"
+encrypt_public_key = "04f68b26422689386a960720ae2a12f071da66c2ba51814bbe8d77ffd6934582db4e3ad490a78aabd4496b6fa75628b8138bbd6812807b2ae5b33aac3f2da393e3"
+sign_public_key = "0461bb7b3adb83a7e4a8bc9cde13c4461b2ee7eb73e5540c33814dca9ba8e14d64a5c1d61e9be964dc362ff893483aa4c0a754c8bc53d34fabd1a8833b16fa671d"
+
+[[orgs.Lygos.operators]]
+name = "mint-attester-testnet4-op-3"
+kind = "hosted"
+operator_id = "72f46145-99ee-44af-9d5f-21dba7d532de"
+wallet_id = "887c4b38-0c00-5362-8b19-b4cae994731f"
+path = "m/5527107'/0'/0'"
+encrypt_public_key = "0400d689f27a0f2235ea3a1b346ce7e03037bd10e59666562d9f26b92d42855797d37ccd3e983c0d74c636510d921a9e4dd163bc5a2263dde04ce2b107dda9e0f8"
+sign_public_key = "041353bfcc3ebb9b58a6f6992943bb626fb64a0352daa68c448f1a9a5933bc45e3d97ed63647c19577d898ec11a103f125505014225d70c0b0827c343c141b0f37"
