@@ -26,7 +26,36 @@ if grep -q 'REPLACE_WITH' "${deploy_cfg}"; then
   exit 0
 fi
 
+# CI auth: the TVC_* secrets become a normal tvc login. Env-var auth alone cannot act as a hosted
+# operator, so the config template with the operator list is installed and the env vars are unset.
+if [ -n "${TVC_ORG_ID:-}" ]; then
+  : "${TVC_API_KEY_PUBLIC:?set with TVC_ORG_ID}" "${TVC_API_KEY_PRIVATE:?set with TVC_ORG_ID}"
+  tk_dir="${HOME}/.config/turnkey"
+  key_path="${tk_dir}/orgs/ci/api_key.json"
+  # Remove the materialized key however the script exits. Secrets are read by jq from the
+  # environment, never passed as arguments, so they do not appear in /proc/*/cmdline.
+  trap 'rm -f "${key_path}"' EXIT
+  (umask 077 && mkdir -p "${tk_dir}/orgs/ci" \
+    && jq -n '{public_key: env.TVC_API_KEY_PUBLIC, private_key: env.TVC_API_KEY_PRIVATE, curve: "p256"}' >"${key_path}" \
+    && sed -e "s|__API_KEY_PATH__|${key_path}|" -e "s|__ORG_ID__|${TVC_ORG_ID}|" \
+         tvc-configs/tvc.config.ci.toml >"${tk_dir}/tvc.config.toml")
+  unset TVC_ORG_ID TVC_API_KEY_PUBLIC TVC_API_KEY_PRIVATE
+elif [ ! -f "${HOME}/.config/turnkey/tvc.config.toml" ]; then
+  echo "::error::no Turnkey credentials: run tvc login, or set TVC_ORG_ID, TVC_API_KEY_PUBLIC and TVC_API_KEY_PRIVATE on the ${env_name} GitHub environment"
+  exit 1
+fi
+
 tvc_json() { tvc "$@" --non-interactive --message-format json; }
+
+# Like tvc_json but discards output on success and prints it on failure, so errors reach the log.
+tvc_quiet() {
+  local out
+  if ! out=$(tvc_json "$@" 2>&1); then
+    echo "tvc $1 $2 failed:" >&2
+    echo "${out}" >&2
+    return 1
+  fi
+}
 
 previous=$(tvc_json app status --app-id "${app_id}" | jq -r '.targetedDeploymentId // empty')
 
@@ -61,14 +90,14 @@ if [ "${auto_live}" != "true" ]; then
 fi
 
 for op in $(jq -r '.approvers[]' "${release_cfg}"); do
-  tvc_json deploy approve --deploy-id "${deploy_id}" --operator-id "${op}" --dangerous-skip-interactive >/dev/null
+  tvc_quiet deploy approve --deploy-id "${deploy_id}" --operator-id "${op}" --dangerous-skip-interactive
   echo "approved by ${op}"
 done
 
 # The enclave must boot and post its attestation before a share can be provisioned.
 for op in $(jq -r '.provisioners[]' "${release_cfg}"); do
   for attempt in $(seq 1 30); do
-    if tvc_json deploy provision --deploy-id "${deploy_id}" --operator-id "${op}" >/dev/null 2>"${TMPDIR:-/tmp}/provision.err"; then
+    if tvc_quiet deploy provision --deploy-id "${deploy_id}" --operator-id "${op}" 2>"${TMPDIR:-/tmp}/provision.err"; then
       echo "provisioned by ${op}"
       break
     fi
@@ -102,7 +131,7 @@ for attempt in $(seq 1 60); do
   sleep 10
 done
 
-tvc_json app set-live-deploy --deploy-id "${deploy_id}" >/dev/null
+tvc_quiet app set-live-deploy --deploy-id "${deploy_id}"
 echo "live deployment set to ${deploy_id}"
 
 for attempt in $(seq 1 12); do
@@ -113,7 +142,7 @@ for attempt in $(seq 1 12); do
   if [ "${attempt}" -eq 12 ]; then
     echo "${health_url} not healthy 2 minutes after switching to ${deploy_id}"
     if [ -n "${previous}" ] && [ "${previous}" != "${deploy_id}" ]; then
-      tvc_json app set-live-deploy --deploy-id "${previous}" >/dev/null
+      tvc_quiet app set-live-deploy --deploy-id "${previous}"
       echo "rolled live deployment back to ${previous}; ${deploy_id} left for inspection"
     else
       echo "::warning::no previous deployment to roll back to; ${deploy_id} is still live and needs manual attention"
@@ -124,7 +153,7 @@ for attempt in $(seq 1 12); do
 done
 
 if [ -n "${previous}" ] && [ "${previous}" != "${deploy_id}" ]; then
-  tvc_json deploy delete --deploy-id "${previous}" >/dev/null
+  tvc_quiet deploy delete --deploy-id "${previous}"
   echo "deleted previous deployment ${previous} (restorable with tvc deploy restore)"
 fi
 summary "live"

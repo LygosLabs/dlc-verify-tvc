@@ -98,7 +98,7 @@ Each environment is one TVC app, created once. The app owns the quorum key, so a
 2. On `dev`: the two hosted operators in the release config approve the manifest and provision their shares, the deployment is set live once all three replicas are ready, `/health` is checked and the previous deployment is re-targeted if it fails, otherwise the previous deployment is deleted (restorable with `tvc deploy restore`).
 3. On `master`: stop after step 1. The job summary prints the deployment and manifest ids. Two operators then run `tvc deploy approve --deploy-id <id> --serial <yubikey serial>`, provision, and one runs `tvc app set-live-deploy`.
 
-CI authenticates with `TVC_ORG_ID`, `TVC_API_KEY_PUBLIC`, and `TVC_API_KEY_PRIVATE` from the GitHub environment of the same name. The production key only needs permission to create deployments.
+CI authenticates with `TVC_ORG_ID`, `TVC_API_KEY_PUBLIC`, and `TVC_API_KEY_PRIVATE` from the GitHub environment of the same name. The release script turns them into a normal `tvc` login using `tvc-configs/tvc.config.ci.toml`, which lists the hosted operators; env-var auth on its own cannot approve or provision as a hosted operator. The production key only needs permission to create deployments.
 
 A release that changes the receipt format needs a new `Verifier` first: deploy it, queue the pointer change, execute after the timelock, then merge to `master` and set the new deployment live.
 
