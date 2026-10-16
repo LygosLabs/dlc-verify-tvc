@@ -57,7 +57,9 @@ tvc_quiet() {
   fi
 }
 
-previous=$(tvc_json app status --app-id "${app_id}" | jq -r '.targetedDeploymentId // empty')
+# Turnkey answers app status with a 500 for an app that has never had a deployment, so a first
+# deploy treats a failed lookup as "no previous deployment".
+previous=$(tvc_json app status --app-id "${app_id}" | jq -r '.targetedDeploymentId // empty') || previous=""
 
 created=$(tvc_json deploy create \
   --config-file "${deploy_cfg}" \
