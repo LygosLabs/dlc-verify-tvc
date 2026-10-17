@@ -57,7 +57,20 @@ tvc_quiet() {
   fi
 }
 
-previous=$(tvc_json app status --app-id "${app_id}" | jq -r '.targetedDeploymentId // empty')
+# The live deployment comes from `app list`, not `app status`: Turnkey answers app status with a 500
+# for an app that has never had a deployment, which can't be told apart from a real failure. Any
+# failure here stops the release, so a redeploy never mistakes itself for a first deploy and skips
+# the rollback and cleanup below.
+if ! apps=$(tvc_json app list 2>&1); then
+  echo "::error::could not list TVC apps:" >&2
+  echo "${apps}" >&2
+  exit 1
+fi
+if ! jq -e --arg id "${app_id}" 'any(.apps[]; .id == $id)' <<<"${apps}" >/dev/null; then
+  echo "::error::TVC app ${app_id} not found" >&2
+  exit 1
+fi
+previous=$(jq -r --arg id "${app_id}" '.apps[] | select(.id == $id) | .liveDeploymentId // empty' <<<"${apps}")
 
 created=$(tvc_json deploy create \
   --config-file "${deploy_cfg}" \
