@@ -11,8 +11,8 @@
     "--network",
     "mutinynet",
     "--allow-insecure-network",
-    "--lygos-funding-pubkey",
-    "REPLACE_WITH_STAGING_MIDNIGHT_FUNDING_PUBKEY",
+    "--lygos-authorizer",
+    "REPLACE_WITH_STAGING_MIDNIGHT_AUTHORIZER_ADDRESS",
     "--oracle-pubkey",
     "03e40252588ea11d87d1e7afc8df27954ea1dd8a52f201a281caef4678f65887"
   ],

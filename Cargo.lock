@@ -1950,6 +1950,7 @@ dependencies = [
  "p256",
  "qos_core",
  "qos_p256",
+ "secp256k1",
  "serde",
  "serde_json",
  "sha2",

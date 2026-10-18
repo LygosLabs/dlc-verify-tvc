@@ -10,8 +10,8 @@
     "3000",
     "--network",
     "mainnet",
-    "--lygos-funding-pubkey",
-    "REPLACE_WITH_MIDNIGHT_LYGOS_FUNDING_PUBKEY",
+    "--lygos-authorizer",
+    "REPLACE_WITH_MIDNIGHT_AUTHORIZER_ADDRESS",
     "--oracle-pubkey",
     "REPLACE_WITH_MIDNIGHT_ORACLE_XONLY_PUBKEY"
   ],
