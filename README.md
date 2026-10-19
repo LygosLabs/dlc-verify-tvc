@@ -114,8 +114,9 @@ Once per environment, from `tvc-configs/*.mint-attester.example.json`:
    tvc keys generate-local-quorum-key -c <dir>/quorum_key.json --quorum-key-metadata-out <dir>/quorum_key_metadata.json
    ```
 2. Put the quorum public key and the three operators in the app config, then `tvc app create --config-file <app config>`. With your own quorum key the config must also declare `shareSetParams` (`name`, `threshold`, `newOperators`, `existingOperatorIds`) listing the operators holding shares; a null share set selects Turnkey's shared default key and provisioning fails with "not part of the manifest share set". Apps cannot be edited afterwards and deleted app names stay reserved.
-3. Put the app id and pinned keys in the deploy config and the operator ids in the release config. Replace every `REPLACE_WITH_` placeholder; the release script skips an environment whose deploy config still has one.
-4. Give the `Verifier` for that environment the app's quorum key, then merge to the branch, or run `scripts/tvc-release.sh <env> <image> <digest>` locally.
+3. Create the environment's Midnight authorizer: an EVM vault in a Lygos-only Fordefi org, never a lender's. `scripts/fordefi-authorizer.sh create "Midnight Authorizer - <env>"` prints its address, the deploy config's `--lygos-authorizer`. Once the `Originator` is deployed, `scripts/fordefi-authorizer.sh check <vault id> <chain id> <originator>` has the vault sign an authorization of no DLC and confirms the enclave's code recovers the vault's address.
+4. Put the app id and pinned keys in the deploy config and the operator ids in the release config. Replace every `REPLACE_WITH_` placeholder; the release script skips an environment whose deploy config still has one.
+5. Give the `Verifier` for that environment the app's quorum key, then merge to the branch, or run `scripts/tvc-release.sh <env> <image> <digest>` locally.
 
 The `Verifier` constructor takes the signing half of the quorum public key: the second 65-byte SEC1 point of the 130-byte key, as `signerX` and `signerY`.
 
