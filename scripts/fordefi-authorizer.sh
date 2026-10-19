@@ -46,7 +46,7 @@ recover() {
     exit 1
   fi
   vault_id=$(jq -r '.vault.id' <<<"${tx}")
-  signature=$(jq -r '.signatures[0].data' <<<"${tx}" | base64 -d | od -An -tx1 -v | tr -d ' \n')
+  signature=$(jq -r '.signatures[0].data' <<<"${tx}" | openssl base64 -d -A | od -An -tx1 -v | tr -d ' \n')
   vault_address=$(get "/api/v1/vaults/${vault_id}" | jq -r '.address' | tr '[:upper:]' '[:lower:]')
   signer=$(cargo run -q -p mint-attester --example authorizer_check -- \
     "${chain_id}" "${originator}" "${zero_hash}" "${signature}")
