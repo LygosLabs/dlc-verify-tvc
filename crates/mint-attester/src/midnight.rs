@@ -177,7 +177,7 @@ pub struct Terms<'a> {
     pub claim_id: &'a [u8; 32],
     /// Oracle event id, as in the receipt.
     pub event_id: &'a [u8; 32],
-    /// The pinned Lygos funding key, 33 bytes compressed.
+    /// Lygos's funding key for this DLC, the accepter's, 33 bytes compressed.
     pub lygos_funding_pubkey: &'a [u8],
     /// The borrower's funding key, 33 bytes compressed.
     pub borrower_funding_pubkey: &'a [u8],

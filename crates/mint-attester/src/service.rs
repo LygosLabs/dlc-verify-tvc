@@ -1,6 +1,7 @@
 //! The attest endpoint: DLC transcript, Midnight policy, lock proof, signed receipt.
 
 use crate::{
+    authorizer,
     midnight::{self, REFUND_GAP_SECS, Terms},
     receipt::{Domain, Receipt, sign_digest},
     spv::{Lock, LockProof, verify_lock},
@@ -15,10 +16,8 @@ use axum::{
 };
 use bitcoin::absolute::LOCK_TIME_THRESHOLD;
 use bitcoin::{
-    Network, ScriptBuf, Txid,
-    consensus::encode::deserialize_hex,
-    hashes::Hash,
-    secp256k1::{PublicKey, XOnlyPublicKey},
+    Network, ScriptBuf, Txid, consensus::encode::deserialize_hex, hashes::Hash,
+    secp256k1::XOnlyPublicKey,
 };
 use p256::ecdsa::SigningKey;
 use serde::Deserialize;
@@ -34,8 +33,8 @@ use verifier_schema::{DlcVerifyResult, VerificationStatus};
 pub struct Config {
     /// Bitcoin network the locks are on.
     pub network: Network,
-    /// The Midnight Lygos funding key.
-    pub lygos_funding_pubkey: PublicKey,
+    /// The Midnight authorizer's EVM address: every DLC's `termsHash` must carry its signature.
+    pub lygos_authorizer: [u8; 20],
     /// The Midnight oracle's key. Typed so an empty pin, which verifier-core reads as "no
     /// expected oracle", cannot be constructed.
     pub oracle_pubkey: XOnlyPublicKey,
@@ -81,6 +80,10 @@ pub struct AttestRequest {
     pub announced_at: u64,
     /// `Verifier` address the receipt is signed for.
     pub verifier: String,
+    /// The Midnight authorizer's EIP-712 signature over this DLC's `termsHash`, `r ‖ s ‖ v`.
+    /// Optional in the body so a client that omits it is told why, not that a field is missing.
+    #[serde(default)]
+    pub authorization: String,
 }
 
 /// The request's EVM-side terms, decoded.
@@ -98,6 +101,8 @@ pub struct LoanTerms {
     pub mint_deadline: u64,
     /// Timestamp of the block the oracle froze the liquidator set at.
     pub announced_at: u64,
+    /// The Midnight authorizer's signature over `termsHash`.
+    pub authorization: [u8; 65],
 }
 
 /// Check a request end to end and return the signed receipt as JSON.
@@ -106,6 +111,9 @@ pub struct LoanTerms {
 ///
 /// Returns why the request was refused.
 pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String> {
+    if request.authorization.is_empty() {
+        return Err("the request carries no Midnight authorization".to_owned());
+    }
     let terms = LoanTerms {
         market: bytes("market", &request.market)?,
         chain_id: request.chain_id,
@@ -113,6 +121,7 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
         controller: fixed("controller", &request.controller)?,
         mint_deadline: request.mint_deadline,
         announced_at: request.announced_at,
+        authorization: fixed("authorization", &request.authorization)?,
     };
     let verifier = fixed("verifier", &request.verifier)?;
 
@@ -219,17 +228,13 @@ pub fn receipt_for(
         ));
     }
 
-    let lygos_key = config.lygos_funding_pubkey.to_string();
-    let lygos = lygos_key.as_str();
+    // Lygos funds from a fresh key per contract, so its key is whichever the accepter used; the
+    // authorization below is what makes it Lygos's. The refund is the trusted last resort and
+    // must pay the Lygos side: the whole funding output to the accepter.
     let offerer = dlc.offerer_funding_pubkey.as_deref().unwrap_or_default();
-    let accepter = dlc.accepter_funding_pubkey.as_deref().unwrap_or_default();
-    // The refund is the trusted last resort and must pay the Lygos side: the whole funding output
-    // to the accepter, with Lygos as the accepter.
-    if offerer == lygos || accepter != lygos {
-        return Err(
-            "the Midnight Lygos funding key must be the accepter's, and only the accepter's"
-                .to_owned(),
-        );
+    let lygos = dlc.accepter_funding_pubkey.as_deref().unwrap_or_default();
+    if lygos.is_empty() || offerer == lygos {
+        return Err("the DLC's two funding keys must be distinct".to_owned());
     }
     if announcement.contract_flags != REFUND_TO_ACCEPTER_FLAG {
         return Err("the DLC must refund to the accepter (contract flags 0x01)".to_owned());
@@ -335,6 +340,10 @@ pub fn receipt_for(
         refund_txid: &txid(dlc.refund_tx_id.as_deref())?,
     }
     .hash();
+    let approval = authorizer::digest(terms.chain_id, &terms.originator, &terms_hash);
+    if authorizer::signer(&approval, &terms.authorization)? != config.lygos_authorizer {
+        return Err("the Midnight authorizer did not sign this DLC's terms".to_owned());
+    }
 
     Ok(Receipt {
         claim_id: lock.claim_id,
@@ -373,6 +382,19 @@ pub fn parse_network(name: &str) -> Result<Network, String> {
         "regtest" => Ok(Network::Regtest),
         other => Err(format!("unsupported network {other:?}")),
     }
+}
+
+/// Parse the `--lygos-authorizer` launch argument: a 20-byte EVM address, `0x` optional.
+///
+/// # Errors
+///
+/// Fails for anything else, or the zero address, which no key signs for.
+pub fn parse_address(value: &str) -> Result<[u8; 20], String> {
+    let address: [u8; 20] = fixed("address", value)?;
+    if address == [0; 20] {
+        return Err("the zero address cannot authorize".to_owned());
+    }
+    Ok(address)
 }
 
 /// `verifier-core` uses the network only to render addresses, so every test network is "testnet".
@@ -472,11 +494,19 @@ mod tests {
     const MARKET: &str = "0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000210500000000000000000000000000000000000000000000000000000000000000a100000000000000000000000000000000000000000000000000000000000000b20000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000006b2db200000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000c30000000000000000000000000000000000000000000000000bef55718ad6000000000000000000000000000000000000000000000000000003782dace9d9000000000000000000000000000000000000000000000000000000000000000000d4";
     const MATURITY: u32 = 1_798_156_800;
     const BLOCK_TIME: u32 = 1_790_000_000;
+    /// The authorizer's secret key in these tests.
+    const AUTHORIZER_SECRET: [u8; 32] = [5; 32];
+
+    /// The authorizer's address, recovered from a signature it made.
+    fn authorizer_address() -> [u8; 20] {
+        authorizer::signer(&[1; 32], &authorizer::sign(&[1; 32], &AUTHORIZER_SECRET))
+            .expect("address")
+    }
 
     fn config() -> Config {
         Config {
             network: Network::Bitcoin,
-            lygos_funding_pubkey: LYGOS.parse().expect("key"),
+            lygos_authorizer: authorizer_address(),
             oracle_pubkey: ORACLE.parse().expect("key"),
             key: SigningKey::from_slice(&[7; 32]).expect("key"),
             allow_insecure_network: false,
@@ -492,7 +522,48 @@ mod tests {
             controller: [0xc0; 20],
             mint_deadline: 1_790_000_000,
             announced_at: 1_789_000_000,
+            authorization: [0; 65],
         }
+    }
+
+    /// The fixture's `termsHash`, built by hand from the values `dlc`, `lock` and `announcement`
+    /// carry.
+    fn terms_hash(terms: &LoanTerms) -> [u8; 32] {
+        let market = midnight::market(&terms.market).expect("market");
+        let event_id = midnight::event_id(
+            terms.chain_id,
+            &terms.originator,
+            &market.id,
+            BORROWER,
+            &[&LIQUIDATOR["liquidated-by-".len()..]],
+            &terms.controller,
+            terms.mint_deadline,
+            terms.announced_at,
+        );
+        Terms {
+            claim_id: &[2; 32],
+            event_id: &event_id,
+            lygos_funding_pubkey: &hex::decode(LYGOS).expect("key"),
+            borrower_funding_pubkey: &hex::decode(BORROWER).expect("key"),
+            announcement: &[9; 100],
+            cet_txids: &[[4; 32], [5; 32], [6; 32]],
+            refund_txid: &[7; 32],
+        }
+        .hash()
+    }
+
+    /// `terms`, signed by `secret` for `terms_hash`.
+    fn signed(mut terms: LoanTerms, terms_hash: &[u8; 32], secret: &[u8; 32]) -> LoanTerms {
+        let digest = authorizer::digest(terms.chain_id, &terms.originator, terms_hash);
+        terms.authorization = authorizer::sign(&digest, secret);
+        terms
+    }
+
+    /// The fixture terms with the authorizer's signature over the fixture DLC.
+    fn authorized() -> LoanTerms {
+        let terms = terms();
+        let hash = terms_hash(&terms);
+        signed(terms, &hash, &AUTHORIZER_SECRET)
     }
 
     fn lock() -> Lock {
@@ -576,7 +647,7 @@ mod tests {
 
     #[test]
     fn issues_a_receipt_for_a_midnight_dlc() {
-        let terms = terms();
+        let terms = authorized();
         let receipt = receipt_for(&config(), &dlc(), &announcement(&terms), &lock(), &terms)
             .expect("receipt");
         assert_eq!(receipt.sats, 50_000_000);
@@ -586,25 +657,44 @@ mod tests {
             hex::encode(receipt.market_id),
             "e7d2aa696b1fa2e75e4afc253f5b8ee8b2ca0b0103328d248f8bd5572a56a353"
         );
-        assert_eq!(
-            receipt.terms_hash,
-            Terms {
-                claim_id: &[2; 32],
-                event_id: &receipt.event_id,
-                lygos_funding_pubkey: &hex::decode(LYGOS).expect("key"),
-                borrower_funding_pubkey: &hex::decode(BORROWER).expect("key"),
-                announcement: &[9; 100],
-                cet_txids: &[[4; 32], [5; 32], [6; 32]],
-                refund_txid: &[7; 32],
-            }
-            .hash()
+        assert_eq!(receipt.terms_hash, terms_hash(&terms));
+    }
+
+    /// Any funding key may be Lygos's, as long as the authorizer signed the DLC that names it.
+    #[test]
+    fn needs_the_authorizer_to_sign_these_exact_terms() {
+        let (dlc, lock, terms) = (dlc(), lock(), terms());
+        let announcement = announcement(&terms);
+        let hash = terms_hash(&terms);
+        let attempt = |terms: &LoanTerms| {
+            receipt_for(&config(), &dlc, &announcement, &lock, terms).expect_err("refused")
+        };
+        let unsigned = attempt(&terms);
+        assert!(unsigned.contains("invalid authorization"), "{unsigned}");
+        let stranger = attempt(&signed(terms.clone(), &hash, &[6; 32]));
+        assert!(stranger.contains("did not sign"), "{stranger}");
+        let mut other_dlc = hash;
+        other_dlc[0] ^= 1;
+        let other = attempt(&signed(terms.clone(), &other_dlc, &AUTHORIZER_SECRET));
+        assert!(other.contains("did not sign"), "{other}");
+        // Signed for another chain's domain: the same terms hash does not carry over.
+        let mut elsewhere = signed(
+            LoanTerms {
+                chain_id: 1,
+                ..terms.clone()
+            },
+            &hash,
+            &AUTHORIZER_SECRET,
         );
+        elsewhere.chain_id = terms.chain_id;
+        assert!(attempt(&elsewhere).contains("did not sign"));
+        assert!(receipt_for(&config(), &dlc, &announcement, &lock, &authorized()).is_ok());
     }
 
     #[test]
     fn refuses_anything_else() {
         let refused = |edit: fn(&mut DlcVerifyResult, &mut LoanTerms, &mut Lock)| {
-            let (mut dlc, mut terms, mut lock) = (dlc(), terms(), lock());
+            let (mut dlc, mut terms, mut lock) = (dlc(), authorized(), lock());
             // The announcement is fixed before the edit, as the oracle signs it before the request.
             let announcement = announcement(&terms);
             edit(&mut dlc, &mut terms, &mut lock);
@@ -616,11 +706,20 @@ mod tests {
         );
         assert!(
             refused(|d, _, _| d.offerer_funding_pubkey = Some(LYGOS.to_owned()))
-                .contains("funding key")
+                .contains("funding keys")
+        );
+        assert!(refused(|d, _, _| d.accepter_funding_pubkey = None).contains("funding keys"));
+        // Swapping the sides changes the terms the authorizer signed.
+        assert!(
+            refused(|d, _, _| {
+                d.accepter_funding_pubkey = Some(BORROWER.to_owned());
+                d.offerer_funding_pubkey = Some(LYGOS.to_owned());
+            })
+            .contains("event id")
         );
         assert!(
-            refused(|d, _, _| d.accepter_funding_pubkey = Some(BORROWER.to_owned()))
-                .contains("funding key")
+            refused(|d, _, _| d.refund_tx_id = Some(Txid::from_byte_array([8; 32]).to_string()))
+                .contains("did not sign")
         );
         assert!(
             refused(|d, _, _| d.refund_locktime = Some(MATURITY + 14 * 24 * 60 * 60 - 1))
@@ -633,9 +732,15 @@ mod tests {
             ..config()
         };
         assert!(
-            receipt_for(&strict, &dlc(), &announcement(&terms()), &lock(), &terms())
-                .expect_err("one confirmation is below the floor")
-                .contains("at least 6")
+            receipt_for(
+                &strict,
+                &dlc(),
+                &announcement(&terms()),
+                &lock(),
+                &authorized()
+            )
+            .expect_err("one confirmation is below the floor")
+            .contains("at least 6")
         );
         assert!(refused(|_, t, _| t.controller = [0xbd; 20]).contains("event id"));
         assert!(refused(|_, t, _| t.originator = [0xbd; 20]).contains("event id"));
@@ -652,7 +757,7 @@ mod tests {
         let mut each_party = announcement(&terms());
         each_party.contract_flags = 0;
         assert!(
-            receipt_for(&config(), &dlc(), &each_party, &lock(), &terms())
+            receipt_for(&config(), &dlc(), &each_party, &lock(), &authorized())
                 .expect_err("must be refused")
                 .contains("refund to the accepter")
         );
@@ -723,14 +828,7 @@ mod tests {
         config.network = Network::Regtest;
         assert!(attempt(&config).contains("--allow-insecure-network"));
         config.allow_insecure_network = true;
-        assert!(attempt(&config).contains("funding key"));
-        // Even with its own key pinned, it does not refund to the accepter.
-        config.lygos_funding_pubkey = dlc
-            .accepter_funding_pubkey
-            .as_deref()
-            .expect("key")
-            .parse()
-            .expect("key");
+        // It does not refund to the accepter, so no authorization would make it a Midnight DLC.
         assert!(
             attempt(&config).contains("refund to the accepter"),
             "{}",
@@ -766,6 +864,7 @@ mod tests {
             mint_deadline: 1_790_000_000,
             announced_at: 1_789_000_000,
             verifier: hex0x(&[0x11; 20]),
+            authorization: hex0x(&[0; 65]),
         };
         let error = attest(&config, &request).expect_err("a testnet DLC is refused on mainnet");
         assert!(error.contains("another Bitcoin network"), "{error}");
@@ -782,6 +881,11 @@ mod tests {
             .collect();
         let error = attest(&config, &unreversed).expect_err("internal byte order is wrong");
         assert!(error.contains("lock proof refused: NotInBlock"), "{error}");
+
+        let mut unauthorized = unreversed;
+        unauthorized.authorization = String::new();
+        let error = attest(&config, &unauthorized).expect_err("no authorization");
+        assert!(error.contains("no Midnight authorization"), "{error}");
     }
 
     #[tokio::test]
@@ -803,6 +907,16 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let response = app.oneshot(post("{")).await.expect("response");
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn the_authorizer_argument_is_a_nonzero_address() {
+        let address = format!("0x{}", "f3".repeat(20));
+        assert_eq!(parse_address(&address), Ok([0xf3; 20]));
+        assert_eq!(parse_address(&"f3".repeat(20)), Ok([0xf3; 20]));
+        assert!(parse_address(&format!("0x{}", "00".repeat(20))).is_err());
+        assert!(parse_address("0x1234").is_err());
+        assert!(parse_address(LYGOS).is_err());
     }
 
     #[test]

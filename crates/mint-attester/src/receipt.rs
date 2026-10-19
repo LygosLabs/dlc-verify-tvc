@@ -3,7 +3,7 @@
 use crate::keccak;
 use p256::ecdsa::{Error, Signature, SigningKey, signature::hazmat::PrehashSigner};
 
-const DOMAIN_TYPE: &[u8] =
+pub(crate) const DOMAIN_TYPE: &[u8] =
     b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
 const RECEIPT_TYPE: &[u8] = b"Receipt(bytes32 claimId,bytes32 termsHash,bytes32 eventId,bytes32 marketId,address controller,uint64 sats,uint32 confirmations,uint64 announcedAt,uint64 expiresAt,bytes32[] inputClaimIds,uint256 chainId,address originator)";
 
@@ -90,7 +90,7 @@ pub fn sign_digest(key: &SigningKey, digest: &[u8; 32]) -> Result<[u8; 64], Erro
 }
 
 /// Left-pad a big-endian value to an ABI word.
-fn word(value: &[u8]) -> [u8; 32] {
+pub(crate) fn word(value: &[u8]) -> [u8; 32] {
     let mut word = [0; 32];
     word[32 - value.len()..].copy_from_slice(value);
     word

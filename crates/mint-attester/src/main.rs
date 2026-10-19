@@ -1,8 +1,8 @@
 //! Lygos mint attester TVC binary.
 
-use bitcoin::secp256k1::{PublicKey, XOnlyPublicKey};
+use bitcoin::secp256k1::XOnlyPublicKey;
 use clap::Parser;
-use mint_attester::service::{Config, parse_network, router};
+use mint_attester::service::{Config, parse_address, parse_network, router};
 use qos_p256::P256Pair;
 use std::io;
 use tracing_subscriber::EnvFilter;
@@ -23,9 +23,9 @@ struct Cli {
     /// Bitcoin network: mainnet, testnet, testnet4, signet (alias mutinynet), or regtest.
     #[arg(long, default_value = "mainnet", value_parser = parse_network)]
     network: bitcoin::Network,
-    /// The Midnight Lygos funding key, compressed hex.
-    #[arg(long)]
-    lygos_funding_pubkey: PublicKey,
+    /// The Midnight authorizer's EVM address, which signs every Midnight DLC's terms.
+    #[arg(long, value_parser = parse_address)]
+    lygos_authorizer: [u8; 20],
     /// The Midnight oracle's x-only public key, hex.
     #[arg(long)]
     oracle_pubkey: XOnlyPublicKey,
@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| io::Error::other(format!("failed to load quorum key: {error:?}")))?;
     let app = router(Config {
         network: cli.network,
-        lygos_funding_pubkey: cli.lygos_funding_pubkey,
+        lygos_authorizer: cli.lygos_authorizer,
         oracle_pubkey: cli.oracle_pubkey,
         key: quorum_key.signing_key().clone(),
         allow_insecure_network: cli.allow_insecure_network,

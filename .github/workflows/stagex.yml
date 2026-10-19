@@ -65,7 +65,7 @@ jobs:
           set -euo pipefail
           key_file="${RUNNER_TEMP}/qos.quorum.key"
           openssl rand -hex 32 > "${key_file}"
-          # Throwaway keys: the secp256k1 generator and its x coordinate.
+          # Throwaway keys: a dummy authorizer address and the secp256k1 generator's x coordinate.
           docker run --rm -d \
             --name mint-attester-smoke \
             --entrypoint /tvc_app \
@@ -73,7 +73,7 @@ jobs:
             -v "${key_file}:/qos.quorum.key:ro" \
             "lygoslabs-dlc-verify-tvc/${{ matrix.target.name }}:latest" \
             --network regtest --allow-insecure-network \
-            --lygos-funding-pubkey 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798 \
+            --lygos-authorizer 0x1111111111111111111111111111111111111111 \
             --oracle-pubkey 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
           trap 'docker rm -f mint-attester-smoke >/dev/null 2>&1 || true' EXIT
           for attempt in $(seq 1 30); do
@@ -92,7 +92,8 @@ jobs:
                originator: "0x0000000000000000000000000000000000000000",
                controller: "0x0000000000000000000000000000000000000000",
                mintDeadline: 0, announcedAt: 0,
-               verifier: "0x0000000000000000000000000000000000000000"}' \
+               verifier: "0x0000000000000000000000000000000000000000",
+               authorization: ("0x" + ("00" * 65))}' \
             crates/verifier-core/tests/fixtures/testnet-loan-118c9fc9.json > "${RUNNER_TEMP}/attest-request.json"
           status=$(curl --silent --output "${RUNNER_TEMP}/attest-response.json" --write-out '%{http_code}' \
             -H 'content-type: application/json' \
