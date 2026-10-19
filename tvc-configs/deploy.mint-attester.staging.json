@@ -1,7 +1,7 @@
 {
   "appId": "3aecfaa6-cbdc-4e50-acc8-9c4a6caeddaa",
   "qosVersion": "0.12.1",
-  "pivotContainerImageUrl": "ghcr.io/lygoslabs/mint-attester@sha256:99b165bd9ac1516cd59d19f193777b1593798f9b1135f44f0ad731841821d823",
+  "pivotContainerImageUrl": "ghcr.io/lygoslabs/mint-attester@sha256:57a1a65824285fe07ef6b1c8c8a7dcf047bb34e3eb817db13c0379c211450906",
   "pivotPath": "/tvc_app",
   "pivotArgs": [
     "--host",
@@ -16,7 +16,7 @@
     "--oracle-pubkey",
     "03e40252588ea11d87d1e7afc8df27954ea1dd8a52f201a281caef4678f65887"
   ],
-  "expectedPivotDigest": "b7b92e70f0d3e82bc9829d9abba8f2cc9659d4f9e7088e14497c5162e1579828",
+  "expectedPivotDigest": "430f79ad700ba4667590f11e62da9cc16009d9a589fdeff813cb8d31ea568e05",
   "dangerousDeployDebugMode": false,
   "healthCheckType": "TVC_HEALTH_CHECK_TYPE_HTTP",
   "healthCheckPort": 3000,
