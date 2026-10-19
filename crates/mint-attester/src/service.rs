@@ -81,6 +81,8 @@ pub struct AttestRequest {
     /// `Verifier` address the receipt is signed for.
     pub verifier: String,
     /// The Midnight authorizer's EIP-712 signature over this DLC's `termsHash`, `r ‖ s ‖ v`.
+    /// Optional in the body so a client that omits it is told why, not that a field is missing.
+    #[serde(default)]
     pub authorization: String,
 }
 
@@ -109,6 +111,9 @@ pub struct LoanTerms {
 ///
 /// Returns why the request was refused.
 pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String> {
+    if request.authorization.is_empty() {
+        return Err("the request carries no Midnight authorization".to_owned());
+    }
     let terms = LoanTerms {
         market: bytes("market", &request.market)?,
         chain_id: request.chain_id,
@@ -876,6 +881,11 @@ mod tests {
             .collect();
         let error = attest(&config, &unreversed).expect_err("internal byte order is wrong");
         assert!(error.contains("lock proof refused: NotInBlock"), "{error}");
+
+        let mut unauthorized = unreversed;
+        unauthorized.authorization = String::new();
+        let error = attest(&config, &unauthorized).expect_err("no authorization");
+        assert!(error.contains("no Midnight authorization"), "{error}");
     }
 
     #[tokio::test]
