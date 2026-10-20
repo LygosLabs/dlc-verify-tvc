@@ -22,7 +22,7 @@ app_id=$(jq -r '.appId' "${deploy_cfg}")
 health_url="https://app-${app_id}.app.turnkey.cloud/health"
 
 if grep -q 'REPLACE_WITH' "${deploy_cfg}"; then
-  echo "::notice::${deploy_cfg} still has placeholders; nothing deployed for ${env_name}"
+  echo "::warning::${deploy_cfg} still has placeholders; nothing deployed for ${env_name}"
   exit 0
 fi
 
