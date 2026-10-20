@@ -228,7 +228,7 @@ jobs:
           path: release-output/release-manifest.json
           if-no-files-found: error
 
-  # Merging to dev rolls every dev enclave forward: the image is pinned by digest, the quorum key is
+  # Merging to dev rolls the staging enclave forward: the image is pinned by digest, the quorum key is
   # the app's and does not change, so nothing on chain moves. Hosted operators approve and provision.
   deploy-dev:
     name: Deploy mint-attester to ${{ matrix.env }}
@@ -241,7 +241,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [testnet4, staging]
+        env: [staging]
     environment: ${{ matrix.env }}
     env:
       TVC_ORG_ID: ${{ secrets.TVC_ORG_ID }}

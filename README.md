@@ -87,8 +87,9 @@ Build the image with `make out/mint-attester/index.json`. CI publishes it as `gh
 | Branch | Environment | Bitcoin network | TVC app config | Release config | Who approves |
 |---|---|---|---|---|---|
 | `dev` | staging | mutinynet (signet) | `app.mint-attester.staging.json` | `release.mint-attester.staging.json` | hosted operators, automatic |
-| `dev` | testnet4 | testnet4 | `app.mint-attester.testnet4.json` | `release.mint-attester.testnet4.json` | hosted operators, automatic |
 | `master` | production | mainnet | `app.mint-attester.mainnet.json` | `release.mint-attester.mainnet.json` | two YubiKey operators, by hand |
+
+Midnight is not tested on testnet4, so there is no testnet4 attester and no testnet4 authorizer.
 
 Each environment is one TVC app, created once. The app owns the quorum key, so a new deployment under the same app signs with the same key and the `Verifier` contract pinned to it never changes. The 24-hour timelock in `lygos-contracts` applies only when a key changes, which means a new app and a new `Verifier`. Enclave code on mainnet is governed by the app's 2-of-3 manifest set instead: whoever holds two operator keys can ship code that signs with the mainnet key, so those keys stay on YubiKeys held by separate people and every mainnet release is announced with its image digest.
 
