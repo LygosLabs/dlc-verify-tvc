@@ -21,7 +21,7 @@ encrypt_public_key = "0457b81bdb20759e9c3c8c292f2efd4331beeec2095c06e3838b27d7b1
 sign_public_key = "04f8d24e7761d3dcf6fbbd262c4708875923beecc416b2969c05025b475e4914b6517d7bcb3f23a79fe82f8579fa711dd583b552cad9cf69bb9a99ebe2fb63110d"
 
 [[orgs.ci.operators]]
-name = "mint-attester-testnet4-op-2"
+name = "lygos-mint-attester-op-2"
 kind = "hosted"
 operator_id = "ed751db2-97a3-44a3-a7ec-b1182c5bcbdf"
 wallet_id = "98b51443-89d3-5e6a-8c1d-d6dc6d2f1f9f"
@@ -30,7 +30,7 @@ encrypt_public_key = "04f68b26422689386a960720ae2a12f071da66c2ba51814bbe8d77ffd6
 sign_public_key = "0461bb7b3adb83a7e4a8bc9cde13c4461b2ee7eb73e5540c33814dca9ba8e14d64a5c1d61e9be964dc362ff893483aa4c0a754c8bc53d34fabd1a8833b16fa671d"
 
 [[orgs.ci.operators]]
-name = "mint-attester-testnet4-op-3"
+name = "lygos-mint-attester-op-3"
 kind = "hosted"
 operator_id = "72f46145-99ee-44af-9d5f-21dba7d532de"
 wallet_id = "887c4b38-0c00-5362-8b19-b4cae994731f"
