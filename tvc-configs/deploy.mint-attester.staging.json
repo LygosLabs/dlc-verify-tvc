@@ -12,7 +12,7 @@
     "mutinynet",
     "--allow-insecure-network",
     "--lygos-authorizer",
-    "REPLACE_WITH_STAGING_MIDNIGHT_AUTHORIZER_ADDRESS",
+    "0x769160E18E574547ca387867decfbd1c2d0E9dEa",
     "--oracle-pubkey",
     "03e40252588ea11d87d1e7afc8df27954ea1dd8a52f201a281caef4678f65887"
   ],
