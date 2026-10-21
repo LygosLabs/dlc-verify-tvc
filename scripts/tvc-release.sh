@@ -72,12 +72,22 @@ if ! jq -e --arg id "${app_id}" 'any(.apps[]; .id == $id)' <<<"${apps}" >/dev/nu
 fi
 previous=$(jq -r --arg id "${app_id}" '.apps[] | select(.id == $id) | .liveDeploymentId // empty' <<<"${apps}")
 
-created=$(tvc_json deploy create \
+# In JSON mode tvc reports errors on stdout, so a failure's output is printed rather than swallowed.
+if ! created=$(tvc_json deploy create \
   --config-file "${deploy_cfg}" \
   --pivot-image-url "${image}" \
-  --expected-pivot-digest "${exec_digest}")
+  --expected-pivot-digest "${exec_digest}"); then
+  echo "::error::tvc deploy create failed for ${env_name}:" >&2
+  echo "${created}" >&2
+  exit 1
+fi
 deploy_id=$(jq -r '.deploymentId' <<<"${created}")
-manifest_id=$(tvc_json deploy status --deploy-id "${deploy_id}" | jq -r '.manifestId')
+if ! status=$(tvc_json deploy status --deploy-id "${deploy_id}"); then
+  echo "::error::tvc deploy status failed for ${deploy_id}:" >&2
+  echo "${status}" >&2
+  exit 1
+fi
+manifest_id=$(jq -r '.manifestId' <<<"${status}")
 echo "created deployment ${deploy_id} (manifest ${manifest_id}) on app ${app_id}"
 
 summary() {
