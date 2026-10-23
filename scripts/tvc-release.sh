@@ -154,7 +154,11 @@ for attempt in $(seq 1 60); do
   sleep 10
 done
 
-tvc_quiet app set-live-deploy --deploy-id "${deploy_id}"
+# Turnkey makes an app's first deployment live by itself, and refuses to set it live again.
+live=$(tvc_json app list | jq -r --arg id "${app_id}" '.apps[] | select(.id == $id) | .liveDeploymentId // empty') || live=""
+if [ "${live}" != "${deploy_id}" ]; then
+  tvc_quiet app set-live-deploy --deploy-id "${deploy_id}"
+fi
 echo "live deployment set to ${deploy_id}"
 
 for attempt in $(seq 1 12); do
