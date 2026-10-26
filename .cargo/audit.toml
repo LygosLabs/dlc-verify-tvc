@@ -1,0 +1,5 @@
+[advisories]
+# RUSTSEC-2026-0387 (crypto-bigint timing variability): no fixed release is reachable from the
+# Turnkey/QOS dependency line. Threat assessment in DEPENDENCY_AUDIT.md. Revisit by 2026-12-31 or
+# at the next Turnkey/QOS release, whichever is first.
+ignore = ["RUSTSEC-2026-0387"]
