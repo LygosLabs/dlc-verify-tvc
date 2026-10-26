@@ -397,9 +397,15 @@ fn output_facts(transaction: &Transaction, network: Network) -> Vec<OutputFact> 
 /// - the contract must refund to the accepter, and the parties' payout scripts must differ. The
 ///   refund then pays the whole funding output to the accepter's own script, which fixes that
 ///   script: without it, the accepter's script and the overrides could trade places, or the
-///   script could be changed behind overrides restoring it, and build the same transactions.
+///   script could be changed behind overrides restoring it, and build the same transactions;
+/// - an override may cover only a CET that pays the offerer nothing. That CET's one output is
+///   then the override script, which fixes it: on a CET that also paid the offerer, the
+///   offerer's script and the override could trade places along with the payout serial ids.
 ///
-/// Overrides are supported on that shape only, which every Midnight DLC has.
+/// Overrides are supported on that shape only: a liquidation outcome of a Midnight DLC, which
+/// refunds to the accepter and pays the whole collateral to the Lygos side, has it. The record is
+/// then determined by the transactions. Other fields of a transcript, such as an unused change
+/// script or the serial ids, are not, with or without a record.
 pub(crate) fn payout_overrides(
     offer: &OfferDlc,
     accept_payout_spk: &Script,
@@ -475,6 +481,12 @@ pub(crate) fn payout_overrides(
         let accept_payout = total_collateral
             .checked_sub(descriptor.payouts[position].offer_payout)
             .ok_or_else(|| format!("outcome {outcome} exceeds collateral"))?;
+        if descriptor.payouts[position].offer_payout != Amount::ZERO {
+            return Err(format!(
+                "payout script override for outcome {outcome:?} covers a CET that also pays the \
+                 offerer"
+            ));
+        }
         if accept_payout < DUST_LIMIT {
             return Err(format!(
                 "payout script override for outcome {outcome:?} covers a CET that pays the \
@@ -1820,7 +1832,28 @@ mod tests {
                 .contains("covers no CET")
         );
         assert!(refused(vec![enum_override(&outcome, ScriptBuf::new())]).contains("empty script"));
-        assert!(refused(vec![enum_override(&dust_outcome, liquidator_script())]).contains("dust"));
+        // A CET that also pays the offerer: the offerer's script and the override could trade
+        // places along with the payout serial ids and build the same CET.
+        assert!(
+            refused(vec![enum_override(&dust_outcome, liquidator_script())])
+                .contains("also pays the offerer")
+        );
+        let mut split = descriptor.clone();
+        for payout in &mut split.payouts {
+            if payout.outcome == outcome {
+                payout.offer_payout = total / 2;
+            }
+        }
+        let mut split_offer = offer.clone();
+        split_offer.tlvs.set(&PayoutScriptOverrides {
+            overrides: vec![enum_override(&outcome, liquidator_script())],
+        });
+        assert!(
+            payout_overrides(&split_offer, &accept.payout_spk, &split)
+                .err()
+                .unwrap_or_default()
+                .contains("also pays the offerer")
+        );
         assert!(
             refused(vec![
                 enum_override(&outcome, liquidator_script()),
