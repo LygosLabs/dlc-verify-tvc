@@ -284,7 +284,9 @@ pub fn receipt_for(
 
     // ponytail: payout addresses stay off-chain, where each co-signer checks its own, so only the
     // split is checked here: Lygos stakes nothing, the borrower takes the whole collateral unless
-    // the loan is liquidated, and the Lygos side takes it all when it is.
+    // the loan is liquidated, and the Lygos side takes it all when it is. That side's output may
+    // pay the liquidator's script instead (a payout script override); the liquidator checks its
+    // own CET, and the authorizer signed every CET txid into `termsHash`.
     if dlc.accept_collateral.as_deref() != Some("0") {
         return Err("Lygos must stake no collateral".to_owned());
     }
@@ -658,6 +660,22 @@ mod tests {
             hex::encode(receipt.market_id),
             "e7d2aa696b1fa2e75e4afc253f5b8ee8b2ca0b0103328d248f8bd5572a56a353"
         );
+        assert_eq!(receipt.terms_hash, terms_hash(&terms));
+    }
+
+    /// A liquidation CET that pays its liquidator directly, through a payout script override, is
+    /// still the Lygos side's whole payout.
+    #[test]
+    fn issues_a_receipt_when_the_liquidator_is_paid_directly() {
+        let terms = authorized();
+        let mut dlc = dlc();
+        for outcome in &mut dlc.outcomes {
+            if outcome.label == LIQUIDATOR {
+                outcome.accepter_payout_override = Some(format!("5120{}", "ab".repeat(32)));
+            }
+        }
+        let receipt =
+            receipt_for(&config(), &dlc, &announcement(&terms), &lock(), &terms).expect("receipt");
         assert_eq!(receipt.terms_hash, terms_hash(&terms));
     }
 

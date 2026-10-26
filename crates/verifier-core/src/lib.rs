@@ -824,8 +824,10 @@ pub fn verify(request: &VerificationRequest) -> Result<VerificationResult, Verif
                                 &mut failures,
                                 "payout-script-overrides",
                                 overrides.is_ok(),
-                                "an offer's payout script overrides must each cover one CET that \
-                                 pays the accepter at least the dust limit",
+                                overrides.as_ref().err().cloned().unwrap_or_else(|| {
+                                    "the offer's payout script overrides each redirect one CET"
+                                        .to_owned()
+                                }),
                             );
                         }
                         let overrides = overrides.unwrap_or_default();
