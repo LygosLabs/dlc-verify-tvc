@@ -815,6 +815,7 @@ pub fn verify(request: &VerificationRequest) -> Result<VerificationResult, Verif
                             descriptor,
                             total_collateral,
                             &accept.payout_spk,
+                            &offer.payout_spk,
                         );
                         // Reported only for an offer carrying records, so other results keep
                         // their check list.
