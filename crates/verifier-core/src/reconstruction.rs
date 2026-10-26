@@ -402,6 +402,11 @@ fn output_facts(transaction: &Transaction, network: Network) -> Vec<OutputFact> 
 ///   then the override script, which fixes it: on a CET that also paid the offerer, the
 ///   offerer's script and the override could trade places along with the payout serial ids.
 ///
+/// - the first outcome in descriptor order whose CET pays anyone but the accepter must pay the
+///   offerer and not be overridden. A CET paying one party everything has one output, and no
+///   signature covers the descriptor amounts, so the offerer taking it all and an override taking
+///   it all would otherwise build the same CET; that outcome fixes the offerer's script.
+///
 /// Overrides are supported on that shape only: a liquidation outcome of a Midnight DLC, which
 /// refunds to the accepter and pays the whole collateral to the Lygos side, has it. The record is
 /// then determined by the transactions. Other fields of a transcript, such as an unused change
@@ -508,6 +513,29 @@ pub(crate) fn payout_overrides(
             _ => {}
         }
         covered.push((position, override_.script_pubkey));
+    }
+    // A CET paying one party the whole collateral has one output, and no signature covers the
+    // descriptor amounts, so "the offerer takes it all" and "the accepter takes it all, overridden
+    // to the same script" build the same CET. The first outcome whose CET pays anyone but the
+    // accepter must be the offerer's, which fixes the offerer's script and leaves every other
+    // output one reading.
+    let first_elsewhere = descriptor
+        .payouts
+        .iter()
+        .enumerate()
+        .find(|(position, payout)| {
+            payout.offer_payout >= DUST_LIMIT
+                || covered.iter().any(|(covered, _)| covered == position)
+        });
+    match first_elsewhere {
+        Some((position, _)) if covered.iter().all(|(covered, _)| *covered != position) => {}
+        _ => {
+            return Err(
+                "the first outcome whose CET pays anyone but the accepter must pay the \
+                        offerer, not a payout script override"
+                    .to_owned(),
+            );
+        }
     }
     Ok(covered)
 }
@@ -1844,6 +1872,50 @@ mod tests {
                 payout.offer_payout = total / 2;
             }
         }
+        // "The offerer takes it all" and "the accepter takes it all, overridden" build the same
+        // one-output CET, so the first CET paying anyone but the accepter must be the offerer's.
+        let relabelled = |offer_payouts: &dyn Fn(usize) -> Amount, overridden: &[usize]| {
+            let mut descriptor = descriptor.clone();
+            for (position, payout) in descriptor.payouts.iter_mut().enumerate() {
+                payout.offer_payout = offer_payouts(position);
+            }
+            let mut offer = offer.clone();
+            offer.tlvs.set(&PayoutScriptOverrides {
+                overrides: overridden
+                    .iter()
+                    .map(|position| {
+                        enum_override(&descriptor.payouts[*position].outcome, liquidator_script())
+                    })
+                    .collect(),
+            });
+            payout_overrides(&offer, &accept.payout_spk, &descriptor)
+                .err()
+                .unwrap_or_default()
+        };
+        let last = descriptor.payouts.len() - 1;
+        // The first outcome overridden, a later one paying the offerer.
+        assert!(
+            relabelled(
+                &|position| if position == last {
+                    total
+                } else {
+                    Amount::ZERO
+                },
+                &[0],
+            )
+            .contains("must pay the offerer")
+        );
+        // No outcome paying the offerer at all.
+        assert!(relabelled(&|_| Amount::ZERO, &[0]).contains("must pay the offerer"));
+        // The offerer's outcome first, then the override: accepted.
+        assert!(
+            relabelled(
+                &|position| if position == 0 { total } else { Amount::ZERO },
+                &[last],
+            )
+            .is_empty()
+        );
+
         let mut split_offer = offer.clone();
         split_offer.tlvs.set(&PayoutScriptOverrides {
             overrides: vec![enum_override(&outcome, liquidator_script())],
