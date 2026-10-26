@@ -386,11 +386,17 @@ fn output_facts(transaction: &Transaction, network: Network) -> Vec<OutputFact> 
 /// the accepter under the dust limit, which has no output to redirect. A numeric override covers no
 /// CET of an enumerated contract, so it is refused as covering none.
 ///
-/// The record's bytes are part of the transcript, so they must be the record's only encoding.
+/// The record's bytes are part of the transcript hash, so a record that builds the same
+/// transactions as another must not verify: anyone could otherwise swap one for the other in a
+/// signed transcript and change its hash. Beyond `ddk-manager`'s checks, the record must be
+/// canonically encoded, name at least one override, list its overrides in the descriptor's outcome
+/// order, and never pay the accepter's own payout script, which redirects nothing. A record that
+/// passes changes at least one CET, and its bytes follow from the CETs it changes.
 pub(crate) fn payout_overrides(
     tlvs: &TlvStream,
     descriptor: &EnumeratedContractDescriptor,
     total_collateral: Amount,
+    accept_payout_spk: &Script,
 ) -> Result<Vec<(usize, ScriptBuf)>, String> {
     let type_id = u64::from(ddk_messages::payout_overrides::PAYOUT_SCRIPT_OVERRIDES_TYPE);
     let mut copies = tlvs.raw().filter(|record| record.tlv_type == type_id);
@@ -406,6 +412,9 @@ pub(crate) fn payout_overrides(
         .ok_or_else(|| "payout script overrides record is missing".to_owned())?;
     if record.encode() != raw.body {
         return Err("payout script overrides record is not canonically encoded".to_owned());
+    }
+    if record.overrides.is_empty() {
+        return Err("payout script overrides record names no override".to_owned());
     }
     if record.overrides.len() > MAX_CONTRACT_ITEMS {
         return Err(format!(
@@ -427,6 +436,11 @@ pub(crate) fn payout_overrides(
                 "payout script override for outcome {outcome:?} has an empty script"
             ));
         }
+        if override_.script_pubkey.as_script() == accept_payout_spk {
+            return Err(format!(
+                "payout script override for outcome {outcome:?} pays the accepter's own payout script"
+            ));
+        }
         // Outcome labels are unique, which `validate_reconstruction_inputs` has checked.
         let position = descriptor
             .payouts
@@ -444,10 +458,19 @@ pub(crate) fn payout_overrides(
                  accepter {accept_payout}, under the {DUST_LIMIT} dust limit"
             ));
         }
-        if covered.iter().any(|(other, _)| *other == position) {
-            return Err(format!(
-                "payout script override for outcome {outcome:?} covers a CET another override covers"
-            ));
+        match covered.last() {
+            Some((previous, _)) if *previous == position => {
+                return Err(format!(
+                    "payout script override for outcome {outcome:?} covers a CET another override covers"
+                ));
+            }
+            Some((previous, _)) if *previous > position => {
+                return Err(format!(
+                    "payout script override for outcome {outcome:?} is out of the descriptor's \
+                     outcome order"
+                ));
+            }
+            _ => {}
         }
         covered.push((position, override_.script_pubkey));
     }
@@ -463,7 +486,12 @@ pub(crate) fn reconstruct(
 ) -> Result<Reconstruction, String> {
     validate_reconstruction_inputs(offer, accept, descriptor)?;
     let total_collateral = offer.get_total_collateral();
-    let overrides = payout_overrides(&offer.tlvs, descriptor, total_collateral)?;
+    let overrides = payout_overrides(
+        &offer.tlvs,
+        descriptor,
+        total_collateral,
+        &accept.payout_spk,
+    )?;
     // The funding transaction reserves the CET fee for the longest script the accepter's output
     // pays, so a CET paying an override script keeps the agreed fee rate.
     let accept_cet_script_len = overrides
@@ -1584,6 +1612,46 @@ mod tests {
         Ok(())
     }
 
+    /// An empty record (type 65005, length 1, no overrides) appended to a signed transcript
+    /// changes its hash and nothing it signs, so it must not verify.
+    #[test]
+    fn a_record_that_redirects_nothing_does_not_verify() -> Result<(), String> {
+        let fixture: Fixture =
+            serde_json::from_str(include_str!("../tests/fixtures/testnet-loan-118c9fc9.json"))
+                .map_err(|error| error.to_string())?;
+        let signed = crate::verify_dlc_compatibility(
+            &fixture.offer,
+            &fixture.accept,
+            fixture.sign.as_deref(),
+            None,
+            Some("testnet"),
+        );
+        assert_eq!(
+            signed.verification_status,
+            verifier_schema::VerificationStatus::Pass
+        );
+        let padded = crate::verify_dlc_compatibility(
+            &format!("{}fdfded0100", fixture.offer),
+            &fixture.accept,
+            fixture.sign.as_deref(),
+            None,
+            Some("testnet"),
+        );
+        assert_eq!(
+            padded.verification_status,
+            verifier_schema::VerificationStatus::Fail
+        );
+        assert!(
+            padded
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("names no override")),
+            "{:?}",
+            padded.error
+        );
+        Ok(())
+    }
+
     #[test]
     fn refuses_payout_overrides_ddk_would_refuse() -> Result<(), String> {
         use ddk_messages::{PayoutScriptOverride, ser_impls::TlvRecord};
@@ -1608,7 +1676,7 @@ mod tests {
         let refused = |overrides: Vec<PayoutScriptOverride>| {
             let mut offer = offer.clone();
             offer.tlvs.set(&PayoutScriptOverrides { overrides });
-            payout_overrides(&offer.tlvs, descriptor, total)
+            payout_overrides(&offer.tlvs, descriptor, total, &accept.payout_spk)
                 .err()
                 .unwrap_or_default()
         };
@@ -1621,7 +1689,7 @@ mod tests {
         assert!(
             refused(vec![
                 enum_override(&outcome, liquidator_script()),
-                enum_override(&outcome, accept.payout_spk.clone()),
+                enum_override(&outcome, offer.payout_spk.clone()),
             ])
             .contains("another override")
         );
@@ -1631,6 +1699,30 @@ mod tests {
                 script_pubkey: liquidator_script(),
             }])
             .contains("numeric")
+        );
+
+        // Records that build the transactions another record builds: accepting them would let
+        // anyone change a signed transcript's hash without changing what it signs.
+        assert!(refused(Vec::new()).contains("names no override"));
+        assert!(
+            refused(vec![enum_override(&outcome, accept.payout_spk.clone())])
+                .contains("accepter's own payout script")
+        );
+        let redirectable = descriptor
+            .payouts
+            .iter()
+            .filter(|payout| total - payout.offer_payout >= DUST_LIMIT)
+            .map(|payout| payout.outcome.clone())
+            .collect::<Vec<_>>();
+        let [first, second, ..] = redirectable.as_slice() else {
+            return Err("the fixture needs two outcomes paying the accepter".to_owned());
+        };
+        assert!(
+            refused(vec![
+                enum_override(second, liquidator_script()),
+                enum_override(first, liquidator_script()),
+            ])
+            .contains("outcome order")
         );
 
         // Two copies of the record: DDK reads the first and node-dlc the last.
@@ -1644,7 +1736,7 @@ mod tests {
         twice.extend(record.to_tlv_bytes());
         let twice: OfferDlc = read_message(&hex::encode(twice))?;
         assert!(
-            payout_overrides(&twice.tlvs, descriptor, total)
+            payout_overrides(&twice.tlvs, descriptor, total, &accept.payout_spk)
                 .err()
                 .unwrap_or_default()
                 .contains("more than one")

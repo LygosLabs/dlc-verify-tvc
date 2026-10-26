@@ -807,55 +807,57 @@ pub fn verify(request: &VerificationRequest) -> Result<VerificationResult, Verif
         .contract_info
     {
         ContractInfo::SingleContractInfo(single) => {
-            let (outcomes, descriptor_supported, descriptor_kind) = match &single
-                .contract_info
-                .contract_descriptor
-            {
-                ContractDescriptor::EnumeratedContractDescriptor(descriptor) => {
-                    let overrides =
-                        reconstruction::payout_overrides(&offer.tlvs, descriptor, total_collateral);
-                    // Reported only for an offer carrying records, so other results keep
-                    // their check list.
-                    if !offer.tlvs.is_empty() {
-                        push_check(
-                            &mut checks,
-                            &mut failures,
-                            "payout-script-overrides",
-                            overrides.is_ok(),
-                            "an offer's payout script overrides must each cover one CET that \
-                                 pays the accepter at least the dust limit",
+            let (outcomes, descriptor_supported, descriptor_kind) =
+                match &single.contract_info.contract_descriptor {
+                    ContractDescriptor::EnumeratedContractDescriptor(descriptor) => {
+                        let overrides = reconstruction::payout_overrides(
+                            &offer.tlvs,
+                            descriptor,
+                            total_collateral,
+                            &accept.payout_spk,
                         );
-                    }
-                    let overrides = overrides.unwrap_or_default();
-                    let mut values = Vec::with_capacity(descriptor.payouts.len());
-                    for (position, payout) in descriptor.payouts.iter().enumerate() {
-                        let accepter_payout = total_collateral.checked_sub(payout.offer_payout);
-                        if accepter_payout.is_none() {
+                        // Reported only for an offer carrying records, so other results keep
+                        // their check list.
+                        if !offer.tlvs.is_empty() {
                             push_check(
                                 &mut checks,
                                 &mut failures,
-                                "outcome-payout-bounds",
-                                false,
-                                "offerer payout cannot exceed total collateral",
+                                "payout-script-overrides",
+                                overrides.is_ok(),
+                                "an offer's payout script overrides must each cover one CET that \
+                                 pays the accepter at least the dust limit",
                             );
                         }
-                        values.push(OutcomeInfo {
-                            label: payout.outcome.clone(),
-                            offerer_sats: amount_string(payout.offer_payout),
-                            accepter_sats: accepter_payout
-                                .map_or_else(|| "0".to_owned(), amount_string),
-                            accepter_payout_override: overrides
-                                .iter()
-                                .find(|(covered, _)| *covered == position)
-                                .map(|(_, script)| hex::encode(script.as_bytes())),
-                        });
+                        let overrides = overrides.unwrap_or_default();
+                        let mut values = Vec::with_capacity(descriptor.payouts.len());
+                        for (position, payout) in descriptor.payouts.iter().enumerate() {
+                            let accepter_payout = total_collateral.checked_sub(payout.offer_payout);
+                            if accepter_payout.is_none() {
+                                push_check(
+                                    &mut checks,
+                                    &mut failures,
+                                    "outcome-payout-bounds",
+                                    false,
+                                    "offerer payout cannot exceed total collateral",
+                                );
+                            }
+                            values.push(OutcomeInfo {
+                                label: payout.outcome.clone(),
+                                offerer_sats: amount_string(payout.offer_payout),
+                                accepter_sats: accepter_payout
+                                    .map_or_else(|| "0".to_owned(), amount_string),
+                                accepter_payout_override: overrides
+                                    .iter()
+                                    .find(|(covered, _)| *covered == position)
+                                    .map(|(_, script)| hex::encode(script.as_bytes())),
+                            });
+                        }
+                        (values, true, "single-enumerated")
                     }
-                    (values, true, "single-enumerated")
-                }
-                ContractDescriptor::NumericOutcomeContractDescriptor(_) => {
-                    (Vec::new(), false, "single-numeric")
-                }
-            };
+                    ContractDescriptor::NumericOutcomeContractDescriptor(_) => {
+                        (Vec::new(), false, "single-numeric")
+                    }
+                };
             push_check(
                 &mut checks,
                 &mut failures,
