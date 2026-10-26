@@ -18,8 +18,8 @@ use ddk_dlc::{
 use ddk_messages::{
     AcceptDlc, CetAdaptorSignature, FundingInput, FundingSignature, OfferDlc, OverrideOutcome,
     PayoutScriptOverrides, SignDlc,
-    contract_msgs::EnumeratedContractDescriptor,
-    oracle_msgs::{OracleAnnouncement, tagged_attestation_msg},
+    contract_msgs::{ContractInfo, EnumeratedContractDescriptor},
+    oracle_msgs::{EventDescriptor, OracleAnnouncement, OracleInfo, tagged_attestation_msg},
 };
 use lightning::util::ser::Writeable as _;
 use secp256k1_zkp::{Message, Secp256k1, ecdsa::Signature};
@@ -402,6 +402,8 @@ fn output_facts(transaction: &Transaction, network: Network) -> Vec<OutputFact> 
 ///   then the override script, which fixes it: on a CET that also paid the offerer, the
 ///   offerer's script and the override could trade places along with the payout serial ids.
 ///
+/// - the descriptor must list its outcomes in the oracle announcement's order, which the oracle
+///   signed; the descriptor's own order is in no signature, and the two rules below read it;
 /// - the first outcome in descriptor order whose CET pays anyone but the accepter must pay the
 ///   offerer and not be overridden. A CET paying one party everything has one output, and no
 ///   signature covers the descriptor amounts, so the offerer taking it all and an override taking
@@ -436,6 +438,31 @@ pub(crate) fn payout_overrides(
     }
     if record.overrides.is_empty() {
         return Err("payout script overrides record names no override".to_owned());
+    }
+    // No signature covers the descriptor's order, which the overrides list and the offerer's
+    // outcome below are read in; the oracle signed its announcement's order.
+    let announced = match &offer.contract_info {
+        ContractInfo::SingleContractInfo(single) => match &single.contract_info.oracle_info {
+            OracleInfo::Single(oracle) => {
+                match &oracle.oracle_announcement.oracle_event.event_descriptor {
+                    EventDescriptor::EnumEvent(event) => Some(&event.outcomes),
+                    EventDescriptor::DigitDecompositionEvent(_) => None,
+                }
+            }
+            OracleInfo::Multi(_) => None,
+        },
+        ContractInfo::DisjointContractInfo(_) => None,
+    };
+    if !announced.is_some_and(|outcomes| {
+        outcomes
+            .iter()
+            .eq(descriptor.payouts.iter().map(|payout| &payout.outcome))
+    }) {
+        return Err(
+            "payout script overrides need the contract's outcomes in the oracle announcement's \
+             signed order"
+                .to_owned(),
+        );
     }
     if offer.contract_flags & ddk_dlc::REFUND_TO_ACCEPTER_FLAG == 0 {
         return Err(
@@ -1914,6 +1941,17 @@ mod tests {
                 &[last],
             )
             .is_empty()
+        );
+
+        // The descriptor's order is in no signature, so a reordered descriptor could move the
+        // offerer's outcome; with overrides it must be the announcement's signed order.
+        let mut reordered = descriptor.clone();
+        reordered.payouts.reverse();
+        assert!(
+            payout_overrides(&offer, &accept.payout_spk, &reordered)
+                .err()
+                .unwrap_or_default()
+                .contains("signed order")
         );
 
         let mut split_offer = offer.clone();
