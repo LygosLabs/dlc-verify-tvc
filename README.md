@@ -4,7 +4,7 @@ A deterministic Rust/DDK implementation of [Lygos DLC Verify](https://github.com
 
 For the current Lygos contract shape—one enumerated contract and one oracle—the Rust verifier reconstructs the funding transaction, CETs, and refund transaction; binds the signed oracle event descriptor to the contract outcomes; verifies the oracle announcement, adaptor signatures, refund signatures, contract linkage, and available funding witnesses; and returns the complete PR #9 result and policy schemas. Checked-in TypeScript goldens cover unsigned and fully signed real transcripts, including exact txids, output facts, contract ID, transcript hash, policy hash, verification digest, and every output field.
 
-The consensus-critical dependency line is pinned exactly to `ddk-messages = 2.0.0-rc.8`, `ddk-dlc = 2.0.0-rc.8`, `bitcoin = 0.32.6`, `lightning = 0.2.2`, and `secp256k1-zkp = 0.11.0`. This implementation does not use `rust-dlc`.
+The consensus-critical dependency line is pinned exactly to `ddk-messages = 2.0.0-rc.9`, `ddk-dlc = 2.0.0-rc.9`, `bitcoin = 0.32.6`, `lightning = 0.2.2`, and `secp256k1-zkp = 0.11.0`. This implementation does not use `rust-dlc`.
 
 ## API
 
@@ -120,6 +120,10 @@ Once per environment, from `tvc-configs/*.mint-attester.example.json`:
 5. Give the `Verifier` for that environment the app's quorum key, then merge to the branch, or run `scripts/tvc-release.sh <env> <image> <digest>` locally.
 
 The `Verifier` constructor takes the signing half of the quorum public key: the second 65-byte SEC1 point of the 130-byte key, as `signerX` and `signerY`.
+
+## Payout script overrides
+
+An offer may carry one DDK 2.0.0-rc.9 `PayoutScriptOverrides` record (TLV type 65005), which makes the CET of each outcome it names pay a third party's script, a liquidator for instance, in place of the accepter's payout script. Reconstruction applies it as `ddk-manager` does: the covered CET is rebuilt with the override script, and funding reserves the CET fee for the longest script the accepter's output can pay. An override must name an outcome of the descriptor whose CET pays the accepter at least the 1,000-sat dust limit, no outcome may be overridden twice, and the record must be canonically encoded. Any other TLV record, and any record on an accept or sign message, is refused as trailing data. Each overridden outcome reports its script as `accepterPayoutOverride`, and a policy whose lender is the accepter credits the lender nothing on it. A test checks the funding transaction, CETs and refund against `ddk-manager`'s own builder byte for byte.
 
 ## Refund mode compatibility
 

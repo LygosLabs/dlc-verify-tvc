@@ -6,19 +6,22 @@ use std::{
 };
 
 use bitcoin::{
-    Address, Amount, EcdsaSighashType, Network, OutPoint, Script, ScriptBuf, Transaction,
+    Address, Amount, EcdsaSighashType, Network, OutPoint, Script, ScriptBuf, Transaction, TxOut,
     consensus::deserialize, hashes::Hash as _, sighash::SighashCache,
 };
 use ddk_dlc::{
-    DlcTransactions, FeeRule, OracleInfo as DlcOracleInfo, PartyParams, Payout, TxInputInfo,
-    create_dlc_transactions_with_fee_rule, create_spliced_dlc_transactions_with_fee_rule,
-    verify_cet_adaptor_sig_from_oracle_info, verify_tx_input_sig,
+    DUST_LIMIT, DlcTransactions, FeeRule, OracleInfo as DlcOracleInfo, PartyParams, Payout,
+    TxInputInfo, create_cet, create_dlc_transactions_with_fee_rule,
+    create_spliced_dlc_transactions_with_fee_rule, verify_cet_adaptor_sig_from_oracle_info,
+    verify_tx_input_sig,
 };
 use ddk_messages::{
-    AcceptDlc, CetAdaptorSignature, FundingInput, FundingSignature, OfferDlc, SignDlc,
+    AcceptDlc, CetAdaptorSignature, FundingInput, FundingSignature, OfferDlc, OverrideOutcome,
+    PayoutScriptOverrides, SignDlc, TlvStream,
     contract_msgs::EnumeratedContractDescriptor,
     oracle_msgs::{OracleAnnouncement, tagged_attestation_msg},
 };
+use lightning::util::ser::Writeable as _;
 use secp256k1_zkp::{Message, Secp256k1, ecdsa::Signature};
 
 /// Upper bound for collections which drive transaction or signature work.
@@ -48,6 +51,8 @@ pub(crate) struct OutputFact {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CetFact {
     pub(crate) outcome: String,
+    /// The script an offer's `PayoutScriptOverrides` pays in the accepter's place, if any.
+    pub(crate) accepter_payout_override: Option<ScriptBuf>,
     pub(crate) txid: String,
     pub(crate) locktime: u32,
     pub(crate) outputs: Vec<OutputFact>,
@@ -370,6 +375,85 @@ fn output_facts(transaction: &Transaction, network: Network) -> Vec<OutputFact> 
         .collect()
 }
 
+/// The CETs an offer's `PayoutScriptOverrides` record (TLV 65005) redirects: for each, its
+/// position in the descriptor and the script its accepter output pays instead of the accepter's
+/// `payout_spk`.
+///
+/// This is `ddk-manager` 2.0.0-rc.9's `cet_records` for the one record type it knows, narrowed to
+/// the enumerated contracts this verifier reconstructs. The checks are the ones that crate makes
+/// before it builds, so an offer it would refuse is refused here too: one copy of the record at
+/// most, every override non-empty and covering a CET, no CET covered twice, and no CET that pays
+/// the accepter under the dust limit, which has no output to redirect. A numeric override covers no
+/// CET of an enumerated contract, so it is refused as covering none.
+///
+/// The record's bytes are part of the transcript, so they must be the record's only encoding.
+pub(crate) fn payout_overrides(
+    tlvs: &TlvStream,
+    descriptor: &EnumeratedContractDescriptor,
+    total_collateral: Amount,
+) -> Result<Vec<(usize, ScriptBuf)>, String> {
+    let type_id = u64::from(ddk_messages::payout_overrides::PAYOUT_SCRIPT_OVERRIDES_TYPE);
+    let mut copies = tlvs.raw().filter(|record| record.tlv_type == type_id);
+    let Some(raw) = copies.next() else {
+        return Ok(Vec::new());
+    };
+    if copies.next().is_some() {
+        return Err("the offer carries more than one payout script overrides record".to_owned());
+    }
+    let record = tlvs
+        .get::<PayoutScriptOverrides>()
+        .map_err(|error| format!("payout script overrides record does not decode: {error:?}"))?
+        .ok_or_else(|| "payout script overrides record is missing".to_owned())?;
+    if record.encode() != raw.body {
+        return Err("payout script overrides record is not canonically encoded".to_owned());
+    }
+    if record.overrides.len() > MAX_CONTRACT_ITEMS {
+        return Err(format!(
+            "too many payout script overrides: {}",
+            record.overrides.len()
+        ));
+    }
+
+    let mut covered = Vec::with_capacity(record.overrides.len());
+    for override_ in record.overrides {
+        let OverrideOutcome::Enum { outcome } = &override_.outcome else {
+            return Err(
+                "a numeric payout script override covers no CET of an enumerated contract"
+                    .to_owned(),
+            );
+        };
+        if override_.script_pubkey.is_empty() {
+            return Err(format!(
+                "payout script override for outcome {outcome:?} has an empty script"
+            ));
+        }
+        // Outcome labels are unique, which `validate_reconstruction_inputs` has checked.
+        let position = descriptor
+            .payouts
+            .iter()
+            .position(|payout| &payout.outcome == outcome)
+            .ok_or_else(|| {
+                format!("payout script override for outcome {outcome:?} covers no CET")
+            })?;
+        let accept_payout = total_collateral
+            .checked_sub(descriptor.payouts[position].offer_payout)
+            .ok_or_else(|| format!("outcome {outcome} exceeds collateral"))?;
+        if accept_payout < DUST_LIMIT {
+            return Err(format!(
+                "payout script override for outcome {outcome:?} covers a CET that pays the \
+                 accepter {accept_payout}, under the {DUST_LIMIT} dust limit"
+            ));
+        }
+        if covered.iter().any(|(other, _)| *other == position) {
+            return Err(format!(
+                "payout script override for outcome {outcome:?} covers a CET another override covers"
+            ));
+        }
+        covered.push((position, override_.script_pubkey));
+    }
+    Ok(covered)
+}
+
 pub(crate) fn reconstruct(
     offer: &OfferDlc,
     accept: &AcceptDlc,
@@ -379,6 +463,13 @@ pub(crate) fn reconstruct(
 ) -> Result<Reconstruction, String> {
     validate_reconstruction_inputs(offer, accept, descriptor)?;
     let total_collateral = offer.get_total_collateral();
+    let overrides = payout_overrides(&offer.tlvs, descriptor, total_collateral)?;
+    // The funding transaction reserves the CET fee for the longest script the accepter's output
+    // pays, so a CET paying an override script keeps the agreed fee rate.
+    let accept_cet_script_len = overrides
+        .iter()
+        .map(|(_, script)| script.len())
+        .fold(accept.payout_spk.len(), usize::max);
     let payouts = descriptor
         .payouts
         .iter()
@@ -424,6 +515,7 @@ pub(crate) fn reconstruct(
                 offer.fund_output_serial_id,
                 offer.contract_flags,
                 fee_rule,
+                accept_cet_script_len,
             )
         } else {
             create_dlc_transactions_with_fee_rule(
@@ -437,11 +529,12 @@ pub(crate) fn reconstruct(
                 offer.fund_output_serial_id,
                 offer.contract_flags,
                 fee_rule,
+                accept_cet_script_len,
             )
         }
     }))
     .map_err(|_| "DDK transaction reconstruction panicked".to_owned())?;
-    let transactions = transaction_result
+    let mut transactions = transaction_result
         .map_err(|error| format!("DDK transaction reconstruction failed: {error}"))?;
     if transactions.cets.len() != descriptor.payouts.len() {
         return Err(format!(
@@ -449,6 +542,28 @@ pub(crate) fn reconstruct(
             transactions.cets.len(),
             descriptor.payouts.len()
         ));
+    }
+    // As `ddk-manager` applies the record: the CET is rebuilt rather than patched, so the output
+    // order and the dust rule are every CET's, and the accepter's output is never found by script.
+    let mut accepter_payout_overrides = vec![None; descriptor.payouts.len()];
+    for (position, script) in overrides {
+        let payout = &payouts[position];
+        let cet = &mut transactions.cets[position];
+        *cet = create_cet(
+            TxOut {
+                value: payout.offer,
+                script_pubkey: offer.payout_spk.clone(),
+            },
+            offer.payout_serial_id,
+            TxOut {
+                value: payout.accept,
+                script_pubkey: script.clone(),
+            },
+            accept.payout_serial_id,
+            &cet.input[0],
+            cet.lock_time.to_consensus_u32(),
+        );
+        accepter_payout_overrides[position] = Some(script);
     }
 
     let funding_output_script = transactions.funding_witness_script.to_p2wsh();
@@ -476,12 +591,16 @@ pub(crate) fn reconstruct(
         .cets
         .iter()
         .zip(descriptor.payouts.iter())
-        .map(|(transaction, outcome)| CetFact {
-            outcome: outcome.outcome.clone(),
-            txid: transaction.compute_txid().to_string(),
-            locktime: transaction.lock_time.to_consensus_u32(),
-            outputs: output_facts(transaction, rendering_network),
-        })
+        .zip(accepter_payout_overrides)
+        .map(
+            |((transaction, outcome), accepter_payout_override)| CetFact {
+                outcome: outcome.outcome.clone(),
+                accepter_payout_override,
+                txid: transaction.compute_txid().to_string(),
+                locktime: transaction.lock_time.to_consensus_u32(),
+                outputs: output_facts(transaction, rendering_network),
+            },
+        )
         .collect();
     let refund_outputs = output_facts(&transactions.refund, rendering_network);
 
@@ -1211,6 +1330,346 @@ mod tests {
         assert_eq!(checks.sign_funding_witnesses.valid, Some(false));
         assert_eq!(checks.sign_funding_witnesses.valid_count, 1);
         assert!(checks.sign_funding_witnesses.error.is_some());
+        Ok(())
+    }
+
+    /// A liquidator's taproot script: longer than a P2WPKH payout script, so funding has to
+    /// reserve more CET fee for it.
+    fn liquidator_script() -> ScriptBuf {
+        ScriptBuf::from_bytes([[0x51, 0x20].as_slice(), &[0xab; 32]].concat())
+    }
+
+    /// The testnet loan fixture with one outcome's CET paying `script` in the accepter's place:
+    /// the first outcome that pays the accepter at least the dust limit.
+    fn overridden(
+        script: ScriptBuf,
+    ) -> Result<(OfferDlc, AcceptDlc, Option<SignDlc>, String), String> {
+        let (mut offer, accept, sign) =
+            fixture(include_str!("../tests/fixtures/testnet-loan-118c9fc9.json"))?;
+        let total = offer.get_total_collateral();
+        let (descriptor, _) = descriptor_and_announcement(&offer)?;
+        let outcome = descriptor
+            .payouts
+            .iter()
+            .find(|payout| total - payout.offer_payout >= DUST_LIMIT)
+            .ok_or("the fixture has no outcome paying the accepter")?
+            .outcome
+            .clone();
+        offer.tlvs.set(&PayoutScriptOverrides {
+            overrides: vec![ddk_messages::PayoutScriptOverride {
+                outcome: OverrideOutcome::Enum {
+                    outcome: outcome.clone(),
+                },
+                script_pubkey: script,
+            }],
+        });
+        Ok((offer, accept, sign, outcome))
+    }
+
+    /// The enclave and Orange Grove must build the same bytes from the same offer, or every
+    /// adaptor signature fails. `ddk-manager`'s builder is what Orange Grove runs.
+    #[test]
+    fn a_payout_override_builds_what_ddk_manager_builds() -> Result<(), String> {
+        use ddk_manager::contract::{
+            ContractDescriptor as ManagerDescriptor,
+            contract_info::ContractInfo as ManagerContractInfo,
+            enum_descriptor::EnumDescriptor,
+            transactions::{ContractTerms, build_contract_transactions},
+        };
+
+        let (offer, accept, _, outcome) = overridden(liquidator_script())?;
+        let (descriptor, announcement) = descriptor_and_announcement(&offer)?;
+        let total = offer.get_total_collateral();
+        let (offer_params, _) = party_params(
+            offer.funding_pubkey,
+            &offer.change_spk,
+            offer.change_serial_id,
+            &offer.payout_spk,
+            offer.payout_serial_id,
+            &offer.funding_inputs,
+            offer.offer_collateral,
+        )?;
+        let (accept_params, _) = party_params(
+            accept.funding_pubkey,
+            &accept.change_spk,
+            accept.change_serial_id,
+            &accept.payout_spk,
+            accept.payout_serial_id,
+            &accept.funding_inputs,
+            accept.accept_collateral,
+        )?;
+        let contract_info = ManagerContractInfo {
+            contract_descriptor: ManagerDescriptor::Enum(EnumDescriptor {
+                outcome_payouts: descriptor
+                    .payouts
+                    .iter()
+                    .map(|payout| ddk_dlc::EnumerationPayout {
+                        outcome: payout.outcome.clone(),
+                        payout: Payout {
+                            offer: payout.offer_payout,
+                            accept: total - payout.offer_payout,
+                        },
+                    })
+                    .collect(),
+            }),
+            oracle_announcements: vec![announcement.clone()],
+            threshold: 1,
+        };
+
+        for fee_rule in [FeeRule::CounterpartyPayout, FeeRule::OwnPayoutOnly] {
+            let ours = reconstruct(&offer, &accept, descriptor, Network::Bitcoin, fee_rule)?;
+            let theirs = build_contract_transactions(
+                &offer_params,
+                &accept_params,
+                std::slice::from_ref(&contract_info),
+                &offer.tlvs,
+                &ContractTerms::from(&offer),
+                fee_rule,
+            )
+            .map_err(|error| error.to_string())?
+            .transactions;
+            assert_eq!(ours.transactions.fund, theirs.fund, "{fee_rule:?}");
+            assert_eq!(ours.transactions.cets, theirs.cets, "{fee_rule:?}");
+            assert_eq!(ours.transactions.refund, theirs.refund, "{fee_rule:?}");
+
+            for (cet, fact) in ours.transactions.cets.iter().zip(&ours.cets) {
+                let pays_liquidator = cet
+                    .output
+                    .iter()
+                    .any(|output| output.script_pubkey == liquidator_script());
+                let pays_accepter = cet
+                    .output
+                    .iter()
+                    .any(|output| output.script_pubkey == accept.payout_spk);
+                assert_eq!(pays_liquidator, fact.outcome == outcome, "{}", fact.outcome);
+                assert!(!(pays_liquidator && pays_accepter), "{}", fact.outcome);
+                assert_eq!(
+                    fact.accepter_payout_override.is_some(),
+                    fact.outcome == outcome
+                );
+            }
+        }
+
+        // Without the longer script's fee reserved, funding differs: the length is part of it.
+        let (plain, _, _) = fixture(include_str!("../tests/fixtures/testnet-loan-118c9fc9.json"))?;
+        let plain = reconstruct(
+            &plain,
+            &accept,
+            descriptor,
+            Network::Bitcoin,
+            FeeRule::CounterpartyPayout,
+        )?;
+        let ours = reconstruct(
+            &offer,
+            &accept,
+            descriptor,
+            Network::Bitcoin,
+            FeeRule::CounterpartyPayout,
+        )?;
+        assert_ne!(plain.transactions.fund, ours.transactions.fund);
+        Ok(())
+    }
+
+    /// An accepter that signed the overridden CETs verifies, and the same signatures fail
+    /// against the offer without the record.
+    #[test]
+    fn a_signed_overridden_transcript_verifies() -> Result<(), String> {
+        use ddk_dlc::{create_cet_adaptor_sig_from_oracle_info, util::get_raw_sig_for_tx_input};
+        use lightning::util::ser::Writeable;
+        use secp256k1_zkp::{PublicKey, SecretKey};
+        use verifier_schema::{DlcPartyRole, DlcVerificationPolicy, ExpectedLenderOutcome};
+
+        let (offer, mut accept, _, outcome) = overridden(liquidator_script())?;
+        let (descriptor, announcement) = descriptor_and_announcement(&offer)?;
+        let secp = Secp256k1::new();
+        let accept_key = SecretKey::from_slice(&[0x42; 32]).map_err(|error| error.to_string())?;
+        accept.funding_pubkey = PublicKey::from_secret_key(&secp, &accept_key);
+
+        let built = reconstruct(
+            &offer,
+            &accept,
+            descriptor,
+            Network::Bitcoin,
+            FeeRule::CounterpartyPayout,
+        )?;
+        let script = &built.transactions.funding_witness_script;
+        let oracle_infos = [DlcOracleInfo::from(announcement)];
+        accept.cet_adaptor_signatures.ecdsa_adaptor_signatures = built
+            .transactions
+            .cets
+            .iter()
+            .zip(&descriptor.payouts)
+            .map(|(cet, payout)| {
+                create_cet_adaptor_sig_from_oracle_info(
+                    &secp,
+                    cet,
+                    &oracle_infos,
+                    &accept_key,
+                    script,
+                    built.funding_value,
+                    &[vec![tagged_attestation_msg(&payout.outcome)]],
+                )
+                .map(|signature| CetAdaptorSignature { signature })
+                .map_err(|error| error.to_string())
+            })
+            .collect::<Result<_, _>>()?;
+        accept.refund_signature = get_raw_sig_for_tx_input(
+            &secp,
+            &built.transactions.refund,
+            0,
+            script,
+            built.funding_value,
+            &accept_key,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let accept_hex = hex::encode(accept.encode());
+        let result = crate::verify_dlc_compatibility(
+            &hex::encode(offer.encode()),
+            &accept_hex,
+            None,
+            None,
+            Some("testnet"),
+        );
+        assert_eq!(result.adaptor_valid, Some(true), "{:?}", result.error);
+        assert_eq!(result.refund_sig_valid, Some(true));
+        let liquidator = hex::encode(liquidator_script().as_bytes());
+        let overridden_outcome = result
+            .outcomes
+            .iter()
+            .find(|info| info.label == outcome)
+            .ok_or("the overridden outcome is missing")?;
+        assert_eq!(
+            overridden_outcome.accepter_payout_override.as_deref(),
+            Some(liquidator.as_str())
+        );
+        assert!(
+            result
+                .cets
+                .iter()
+                .find(|cet| cet.outcome == outcome)
+                .is_some_and(|cet| cet
+                    .outputs
+                    .iter()
+                    .any(|output| output.script_pub_key == liquidator))
+        );
+
+        // A lender on the accepting side is not paid what an override sends elsewhere.
+        let policy = DlcVerificationPolicy {
+            lender_role: Some(DlcPartyRole::Accepter),
+            expected_lender_outcomes: Some(vec![ExpectedLenderOutcome {
+                outcome: outcome.clone(),
+                lender_payout_sats: overridden_outcome.accepter_sats.clone(),
+            }]),
+            ..DlcVerificationPolicy::default()
+        };
+        let evaluated = verifier_policy::evaluate_dlc_policy(&result, Some(&policy))
+            .map_err(|error| error.to_string())?;
+        let check = evaluated
+            .checks
+            .iter()
+            .find(|check| check.id == format!("lender-outcome:{outcome}"))
+            .ok_or("the lender outcome check is missing")?;
+        assert_eq!(check.actual, serde_json::Value::String("0".to_owned()));
+
+        let (plain, _, _) = fixture(include_str!("../tests/fixtures/testnet-loan-118c9fc9.json"))?;
+        let result = crate::verify_dlc_compatibility(
+            &hex::encode(plain.encode()),
+            &accept_hex,
+            None,
+            None,
+            Some("testnet"),
+        );
+        assert_eq!(result.adaptor_valid, Some(false));
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_payout_overrides_ddk_would_refuse() -> Result<(), String> {
+        use ddk_messages::{PayoutScriptOverride, ser_impls::TlvRecord};
+        use lightning::util::ser::Writeable;
+
+        let (offer, accept, _, outcome) = overridden(liquidator_script())?;
+        let (descriptor, _) = descriptor_and_announcement(&offer)?;
+        let total = offer.get_total_collateral();
+        let dust_outcome = descriptor
+            .payouts
+            .iter()
+            .find(|payout| total - payout.offer_payout < DUST_LIMIT)
+            .ok_or("the fixture has no outcome paying the accepter nothing")?
+            .outcome
+            .clone();
+        let enum_override = |outcome: &str, script: ScriptBuf| PayoutScriptOverride {
+            outcome: OverrideOutcome::Enum {
+                outcome: outcome.to_owned(),
+            },
+            script_pubkey: script,
+        };
+        let refused = |overrides: Vec<PayoutScriptOverride>| {
+            let mut offer = offer.clone();
+            offer.tlvs.set(&PayoutScriptOverrides { overrides });
+            payout_overrides(&offer.tlvs, descriptor, total)
+                .err()
+                .unwrap_or_default()
+        };
+        assert!(
+            refused(vec![enum_override("no-such-outcome", liquidator_script())])
+                .contains("covers no CET")
+        );
+        assert!(refused(vec![enum_override(&outcome, ScriptBuf::new())]).contains("empty script"));
+        assert!(refused(vec![enum_override(&dust_outcome, liquidator_script())]).contains("dust"));
+        assert!(
+            refused(vec![
+                enum_override(&outcome, liquidator_script()),
+                enum_override(&outcome, accept.payout_spk.clone()),
+            ])
+            .contains("another override")
+        );
+        assert!(
+            refused(vec![PayoutScriptOverride {
+                outcome: OverrideOutcome::Numeric { start: 0, end: 1 },
+                script_pubkey: liquidator_script(),
+            }])
+            .contains("numeric")
+        );
+
+        // Two copies of the record: DDK reads the first and node-dlc the last.
+        let record = PayoutScriptOverrides {
+            overrides: vec![enum_override(&outcome, liquidator_script())],
+        };
+        let mut plain = offer.clone();
+        plain.tlvs = TlvStream::default();
+        let mut twice = plain.encode();
+        twice.extend(record.to_tlv_bytes());
+        twice.extend(record.to_tlv_bytes());
+        let twice: OfferDlc = read_message(&hex::encode(twice))?;
+        assert!(
+            payout_overrides(&twice.tlvs, descriptor, total)
+                .err()
+                .unwrap_or_default()
+                .contains("more than one")
+        );
+
+        // The record is allowed on an offer, and on nothing else.
+        let offer_hex = hex::encode(offer.encode());
+        crate::offer_announcement(&offer_hex).map_err(|error| error.to_string())?;
+        let mut accept_with_record = accept.encode();
+        accept_with_record.extend(record.to_tlv_bytes());
+        let result = crate::verify_dlc_compatibility(
+            &offer_hex,
+            &hex::encode(accept_with_record),
+            None,
+            None,
+            None,
+        );
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("unexpected TLV record of type 65005")),
+            "{:?}",
+            result.error
+        );
         Ok(())
     }
 }

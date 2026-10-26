@@ -56,8 +56,8 @@ qos_json = { version = "=0.14.1", default-features = false }
 qos_p256 = { version = "=0.14.1", default-features = false }
 turnkey_proofs = "=0.15.0"
 bitcoin = { version = "=0.32.6", default-features = false, features = ["std"] }
-ddk-dlc = { version = "=2.0.0-rc.8", default-features = false, features = ["std"] }
-ddk-messages = { version = "=2.0.0-rc.8", default-features = false, features = ["std"] }
+ddk-dlc = { version = "=2.0.0-rc.9", default-features = false, features = ["std"] }
+ddk-messages = { version = "=2.0.0-rc.9", default-features = false, features = ["std"] }
 hex = "=0.4.3"
 lightning = { version = "=0.2.2", default-features = false, features = ["std"] }
 secp256k1-zkp = { version = "=0.11.0", default-features = false, features = ["std"] }

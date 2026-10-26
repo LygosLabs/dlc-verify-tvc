@@ -634,6 +634,7 @@ mod tests {
                     label: label.to_owned(),
                     offerer_sats: borrower.to_owned(),
                     accepter_sats: lygos.to_owned(),
+                    accepter_payout_override: None,
                 }
             })
             .to_vec(),

@@ -348,6 +348,11 @@ fn evaluate_lender_outcomes(
             .get(expectation.outcome.as_str())
             .and_then(|outcome| match policy.and_then(|value| value.lender_role) {
                 Some(DlcPartyRole::Offerer) => Some(outcome.offerer_sats.clone()),
+                // A payout script override sends the accepter's amount to another script, so an
+                // accepting lender is paid nothing on that outcome.
+                Some(DlcPartyRole::Accepter) if outcome.accepter_payout_override.is_some() => {
+                    Some("0".to_owned())
+                }
                 Some(DlcPartyRole::Accepter) => Some(outcome.accepter_sats.clone()),
                 None => None,
             });
@@ -508,11 +513,13 @@ mod tests {
                     label: "WIN".to_owned(),
                     offerer_sats: "60".to_owned(),
                     accepter_sats: "40".to_owned(),
+                    accepter_payout_override: None,
                 },
                 OutcomeInfo {
                     label: "LOSE".to_owned(),
                     offerer_sats: "0".to_owned(),
                     accepter_sats: "100".to_owned(),
+                    accepter_payout_override: None,
                 },
             ],
             extracted_oracle_pubkey: Some("aabb".to_owned()),
