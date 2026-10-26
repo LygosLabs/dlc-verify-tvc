@@ -17,7 +17,7 @@ use ddk_dlc::{
 };
 use ddk_messages::{
     AcceptDlc, CetAdaptorSignature, FundingInput, FundingSignature, OfferDlc, OverrideOutcome,
-    PayoutScriptOverrides, SignDlc, TlvStream,
+    PayoutScriptOverrides, SignDlc,
     contract_msgs::EnumeratedContractDescriptor,
     oracle_msgs::{OracleAnnouncement, tagged_attestation_msg},
 };
@@ -388,20 +388,26 @@ fn output_facts(transaction: &Transaction, network: Network) -> Vec<OutputFact> 
 ///
 /// The record's bytes are part of the transcript hash, so a record that builds the same
 /// transactions as another must not verify: anyone could otherwise swap one for the other in a
-/// signed transcript and change its hash. Beyond `ddk-manager`'s checks, the record must be
-/// canonically encoded, name at least one override, list its overrides in the descriptor's outcome
-/// order, and pay neither party's payout script: the accepter's own redirects nothing, and the
-/// offerer's would pay it an amount its descriptor payout does not show. A record that passes
-/// changes at least one CET, and its bytes follow from the CETs it changes. `reconstruct` also
-/// requires the accepter's payout script to stay in some transaction, so it cannot be swapped
-/// together with overrides that restore it.
+/// signed transcript and change its hash. Beyond `ddk-manager`'s checks:
+///
+/// - the record must be canonically encoded, name at least one override, list its overrides in the
+///   descriptor's outcome order, and pay neither party's payout script: the accepter's own
+///   redirects nothing, and the offerer's would pay it an amount its descriptor payout does not
+///   show;
+/// - the contract must refund to the accepter, and the parties' payout scripts must differ. The
+///   refund then pays the whole funding output to the accepter's own script, which fixes that
+///   script: without it, the accepter's script and the overrides could trade places, or the
+///   script could be changed behind overrides restoring it, and build the same transactions.
+///
+/// Overrides are supported on that shape only, which every Midnight DLC has.
 pub(crate) fn payout_overrides(
-    tlvs: &TlvStream,
-    descriptor: &EnumeratedContractDescriptor,
-    total_collateral: Amount,
+    offer: &OfferDlc,
     accept_payout_spk: &Script,
-    offer_payout_spk: &Script,
+    descriptor: &EnumeratedContractDescriptor,
 ) -> Result<Vec<(usize, ScriptBuf)>, String> {
+    let tlvs = &offer.tlvs;
+    let total_collateral = offer.get_total_collateral();
+    let offer_payout_spk = offer.payout_spk.as_script();
     let type_id = u64::from(ddk_messages::payout_overrides::PAYOUT_SCRIPT_OVERRIDES_TYPE);
     let mut copies = tlvs.raw().filter(|record| record.tlv_type == type_id);
     let Some(raw) = copies.next() else {
@@ -419,6 +425,14 @@ pub(crate) fn payout_overrides(
     }
     if record.overrides.is_empty() {
         return Err("payout script overrides record names no override".to_owned());
+    }
+    if offer.contract_flags & ddk_dlc::REFUND_TO_ACCEPTER_FLAG == 0 {
+        return Err(
+            "payout script overrides need the refund-to-accepter contract flag (0x01)".to_owned(),
+        );
+    }
+    if accept_payout_spk == offer_payout_spk {
+        return Err("payout script overrides need distinct party payout scripts".to_owned());
     }
     if record.overrides.len() > MAX_CONTRACT_ITEMS {
         return Err(format!(
@@ -495,13 +509,7 @@ pub(crate) fn reconstruct(
 ) -> Result<Reconstruction, String> {
     validate_reconstruction_inputs(offer, accept, descriptor)?;
     let total_collateral = offer.get_total_collateral();
-    let overrides = payout_overrides(
-        &offer.tlvs,
-        descriptor,
-        total_collateral,
-        &accept.payout_spk,
-        &offer.payout_spk,
-    )?;
+    let overrides = payout_overrides(offer, &accept.payout_spk, descriptor)?;
     // The funding transaction reserves the CET fee for the longest script the accepter's output
     // pays, so a CET paying an override script keeps the agreed fee rate.
     let accept_cet_script_len = overrides
@@ -602,23 +610,6 @@ pub(crate) fn reconstruct(
             cet.lock_time.to_consensus_u32(),
         );
         accepter_payout_overrides[position] = Some(script);
-    }
-    // With every accepter payout overridden and no refund to the accepter, its payout script would
-    // be in no transaction, and could be changed alongside overrides restoring it.
-    let pays_accepter = |transaction: &Transaction| {
-        transaction
-            .output
-            .iter()
-            .any(|output| output.script_pubkey == accept.payout_spk)
-    };
-    if accepter_payout_overrides.iter().any(Option::is_some)
-        && !pays_accepter(&transactions.refund)
-        && !transactions.cets.iter().any(pays_accepter)
-    {
-        return Err(
-            "payout script overrides leave the accepter's payout script in no transaction"
-                .to_owned(),
-        );
     }
 
     let funding_output_script = transactions.funding_witness_script.to_p2wsh();
@@ -1394,8 +1385,8 @@ mod tests {
         ScriptBuf::from_bytes([[0x51, 0x20].as_slice(), &[0xab; 32]].concat())
     }
 
-    /// The testnet loan fixture with one outcome's CET paying `script` in the accepter's place:
-    /// the first outcome that pays the accepter at least the dust limit.
+    /// The testnet loan fixture, refunding to the accepter, with one outcome's CET paying `script`
+    /// in the accepter's place: the first outcome that pays the accepter at least the dust limit.
     fn overridden(
         script: ScriptBuf,
     ) -> Result<(OfferDlc, AcceptDlc, Option<SignDlc>, String), String> {
@@ -1410,6 +1401,7 @@ mod tests {
             .ok_or("the fixture has no outcome paying the accepter")?
             .outcome
             .clone();
+        offer.contract_flags = ddk_dlc::REFUND_TO_ACCEPTER_FLAG;
         offer.tlvs.set(&PayoutScriptOverrides {
             overrides: vec![ddk_messages::PayoutScriptOverride {
                 outcome: OverrideOutcome::Enum {
@@ -1679,65 +1671,119 @@ mod tests {
         Ok(())
     }
 
-    /// With no refund to the accepter, overriding every CET that pays it leaves its payout script
-    /// in no transaction. Swapping that script for another while the overrides pay the original
-    /// would keep every signed transaction and change the transcript hash.
+    /// Without a refund to the accepter, the accepter's own payout script is fixed only by the CETs,
+    /// so overrides could restore it after it is swapped, or trade places with it, and build the same
+    /// transactions under a different transcript hash. Overrides need the refund-to-accepter flag and
+    /// distinct party scripts, which fix it through the refund.
     #[test]
-    fn the_accepter_payout_script_cannot_be_swapped_behind_overrides() -> Result<(), String> {
+    fn overrides_need_a_refund_that_fixes_the_accepter_script() -> Result<(), String> {
         use ddk_messages::PayoutScriptOverride;
         use lightning::util::ser::Writeable;
 
         let fixture: Fixture =
             serde_json::from_str(include_str!("../tests/fixtures/testnet-loan-118c9fc9.json"))
                 .map_err(|error| error.to_string())?;
-        let (mut offer, mut accept, _) =
+        let (plain, accept, _) =
             self::fixture(include_str!("../tests/fixtures/testnet-loan-118c9fc9.json"))?;
-        assert_eq!(
-            offer.contract_flags, 0,
-            "the refund must not pay the accepter"
-        );
-        assert_eq!(accept.accept_collateral, Amount::ZERO);
-        let total = offer.get_total_collateral();
-        let (descriptor, _) = descriptor_and_announcement(&offer)?;
-        let original = accept.payout_spk.clone();
-        offer.tlvs.set(&PayoutScriptOverrides {
-            overrides: descriptor
-                .payouts
+        assert_eq!(plain.contract_flags, 0);
+        let total = plain.get_total_collateral();
+        let (descriptor, _) = descriptor_and_announcement(&plain)?;
+        let redirectable = descriptor
+            .payouts
+            .iter()
+            .filter(|payout| total - payout.offer_payout >= DUST_LIMIT)
+            .map(|payout| payout.outcome.clone())
+            .collect::<Vec<_>>();
+        let overriding = |outcomes: &[String], script: &ScriptBuf| PayoutScriptOverrides {
+            overrides: outcomes
                 .iter()
-                .filter(|payout| total - payout.offer_payout >= DUST_LIMIT)
-                .map(|payout| PayoutScriptOverride {
+                .map(|outcome| PayoutScriptOverride {
                     outcome: OverrideOutcome::Enum {
-                        outcome: payout.outcome.clone(),
+                        outcome: outcome.clone(),
                     },
-                    script_pubkey: original.clone(),
+                    script_pubkey: script.clone(),
                 })
                 .collect(),
-        });
-        let mut swapped = original.to_bytes();
-        if let Some(last) = swapped.last_mut() {
+        };
+        let verify = |offer: &OfferDlc, accept: &AcceptDlc| {
+            crate::verify_dlc_compatibility(
+                &hex::encode(offer.encode()),
+                &hex::encode(accept.encode()),
+                fixture.sign.as_deref(),
+                None,
+                Some("testnet"),
+            )
+        };
+        let refused_with = |result: verifier_schema::DlcVerifyResult, reason: &str| {
+            assert_eq!(
+                result.verification_status,
+                verifier_schema::VerificationStatus::Fail
+            );
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(reason)),
+                "{:?}",
+                result.error
+            );
+        };
+
+        // Swapping the accepter's script behind overrides that pay the original, with no refund to
+        // the accepter.
+        let mut offer = plain.clone();
+        offer
+            .tlvs
+            .set(&overriding(&redirectable, &accept.payout_spk));
+        let mut swapped = accept.clone();
+        let mut script = accept.payout_spk.to_bytes();
+        if let Some(last) = script.last_mut() {
             *last ^= 1;
         }
-        accept.payout_spk = ScriptBuf::from_bytes(swapped);
+        swapped.payout_spk = ScriptBuf::from_bytes(script);
+        refused_with(verify(&offer, &swapped), "refund-to-accepter");
 
-        let result = crate::verify_dlc_compatibility(
-            &hex::encode(offer.encode()),
-            &hex::encode(accept.encode()),
-            fixture.sign.as_deref(),
-            None,
-            Some("testnet"),
-        );
-        assert_eq!(
-            result.verification_status,
-            verifier_schema::VerificationStatus::Fail
-        );
-        assert!(
-            result
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("in no transaction")),
-            "{:?}",
-            result.error
-        );
+        // The accepter declaring the offerer's script, which the refund then pays either way.
+        let mut offer = plain.clone();
+        offer.contract_flags = ddk_dlc::REFUND_TO_ACCEPTER_FLAG;
+        offer
+            .tlvs
+            .set(&overriding(&redirectable, &accept.payout_spk));
+        let mut shared = accept.clone();
+        shared.payout_spk = plain.payout_spk.clone();
+        refused_with(verify(&offer, &shared), "distinct party payout scripts");
+
+        // The accepter's script and an override trading places: with the refund paying the
+        // accepter's script, the two build different refunds.
+        let [first, rest @ ..] = redirectable.as_slice() else {
+            return Err("the fixture has no outcome paying the accepter".to_owned());
+        };
+        let mut one = plain.clone();
+        one.contract_flags = ddk_dlc::REFUND_TO_ACCEPTER_FLAG;
+        one.tlvs.set(&overriding(
+            std::slice::from_ref(first),
+            &liquidator_script(),
+        ));
+        let mut traded = one.clone();
+        traded.tlvs.set(&overriding(rest, &accept.payout_spk));
+        let mut traded_accept = accept.clone();
+        traded_accept.payout_spk = liquidator_script();
+        let one = reconstruct(
+            &one,
+            &accept,
+            descriptor,
+            Network::Bitcoin,
+            FeeRule::CounterpartyPayout,
+        )?;
+        let traded = reconstruct(
+            &traded,
+            &traded_accept,
+            descriptor,
+            Network::Bitcoin,
+            FeeRule::CounterpartyPayout,
+        )?;
+        assert_eq!(one.transactions.cets, traded.transactions.cets);
+        assert_ne!(one.transactions.refund, traded.transactions.refund);
         Ok(())
     }
 
@@ -1765,15 +1811,9 @@ mod tests {
         let refused = |overrides: Vec<PayoutScriptOverride>| {
             let mut offer = offer.clone();
             offer.tlvs.set(&PayoutScriptOverrides { overrides });
-            payout_overrides(
-                &offer.tlvs,
-                descriptor,
-                total,
-                &accept.payout_spk,
-                &offer.payout_spk,
-            )
-            .err()
-            .unwrap_or_default()
+            payout_overrides(&offer, &accept.payout_spk, descriptor)
+                .err()
+                .unwrap_or_default()
         };
         assert!(
             refused(vec![enum_override("no-such-outcome", liquidator_script())])
@@ -1829,22 +1869,16 @@ mod tests {
             overrides: vec![enum_override(&outcome, liquidator_script())],
         };
         let mut plain = offer.clone();
-        plain.tlvs = TlvStream::default();
+        plain.tlvs = ddk_messages::TlvStream::default();
         let mut twice = plain.encode();
         twice.extend(record.to_tlv_bytes());
         twice.extend(record.to_tlv_bytes());
         let twice: OfferDlc = read_message(&hex::encode(twice))?;
         assert!(
-            payout_overrides(
-                &twice.tlvs,
-                descriptor,
-                total,
-                &accept.payout_spk,
-                &offer.payout_spk,
-            )
-            .err()
-            .unwrap_or_default()
-            .contains("more than one")
+            payout_overrides(&twice, &accept.payout_spk, descriptor)
+                .err()
+                .unwrap_or_default()
+                .contains("more than one")
         );
 
         // The record is allowed on an offer, and on nothing else.

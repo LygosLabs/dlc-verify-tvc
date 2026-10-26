@@ -807,60 +807,57 @@ pub fn verify(request: &VerificationRequest) -> Result<VerificationResult, Verif
         .contract_info
     {
         ContractInfo::SingleContractInfo(single) => {
-            let (outcomes, descriptor_supported, descriptor_kind) =
-                match &single.contract_info.contract_descriptor {
-                    ContractDescriptor::EnumeratedContractDescriptor(descriptor) => {
-                        let overrides = reconstruction::payout_overrides(
-                            &offer.tlvs,
-                            descriptor,
-                            total_collateral,
-                            &accept.payout_spk,
-                            &offer.payout_spk,
+            let (outcomes, descriptor_supported, descriptor_kind) = match &single
+                .contract_info
+                .contract_descriptor
+            {
+                ContractDescriptor::EnumeratedContractDescriptor(descriptor) => {
+                    let overrides =
+                        reconstruction::payout_overrides(&offer, &accept.payout_spk, descriptor);
+                    // Reported only for an offer carrying records, so other results keep
+                    // their check list.
+                    if !offer.tlvs.is_empty() {
+                        push_check(
+                            &mut checks,
+                            &mut failures,
+                            "payout-script-overrides",
+                            overrides.is_ok(),
+                            overrides.as_ref().err().cloned().unwrap_or_else(|| {
+                                "the offer's payout script overrides each redirect one CET"
+                                    .to_owned()
+                            }),
                         );
-                        // Reported only for an offer carrying records, so other results keep
-                        // their check list.
-                        if !offer.tlvs.is_empty() {
+                    }
+                    let overrides = overrides.unwrap_or_default();
+                    let mut values = Vec::with_capacity(descriptor.payouts.len());
+                    for (position, payout) in descriptor.payouts.iter().enumerate() {
+                        let accepter_payout = total_collateral.checked_sub(payout.offer_payout);
+                        if accepter_payout.is_none() {
                             push_check(
                                 &mut checks,
                                 &mut failures,
-                                "payout-script-overrides",
-                                overrides.is_ok(),
-                                overrides.as_ref().err().cloned().unwrap_or_else(|| {
-                                    "the offer's payout script overrides each redirect one CET"
-                                        .to_owned()
-                                }),
+                                "outcome-payout-bounds",
+                                false,
+                                "offerer payout cannot exceed total collateral",
                             );
                         }
-                        let overrides = overrides.unwrap_or_default();
-                        let mut values = Vec::with_capacity(descriptor.payouts.len());
-                        for (position, payout) in descriptor.payouts.iter().enumerate() {
-                            let accepter_payout = total_collateral.checked_sub(payout.offer_payout);
-                            if accepter_payout.is_none() {
-                                push_check(
-                                    &mut checks,
-                                    &mut failures,
-                                    "outcome-payout-bounds",
-                                    false,
-                                    "offerer payout cannot exceed total collateral",
-                                );
-                            }
-                            values.push(OutcomeInfo {
-                                label: payout.outcome.clone(),
-                                offerer_sats: amount_string(payout.offer_payout),
-                                accepter_sats: accepter_payout
-                                    .map_or_else(|| "0".to_owned(), amount_string),
-                                accepter_payout_override: overrides
-                                    .iter()
-                                    .find(|(covered, _)| *covered == position)
-                                    .map(|(_, script)| hex::encode(script.as_bytes())),
-                            });
-                        }
-                        (values, true, "single-enumerated")
+                        values.push(OutcomeInfo {
+                            label: payout.outcome.clone(),
+                            offerer_sats: amount_string(payout.offer_payout),
+                            accepter_sats: accepter_payout
+                                .map_or_else(|| "0".to_owned(), amount_string),
+                            accepter_payout_override: overrides
+                                .iter()
+                                .find(|(covered, _)| *covered == position)
+                                .map(|(_, script)| hex::encode(script.as_bytes())),
+                        });
                     }
-                    ContractDescriptor::NumericOutcomeContractDescriptor(_) => {
-                        (Vec::new(), false, "single-numeric")
-                    }
-                };
+                    (values, true, "single-enumerated")
+                }
+                ContractDescriptor::NumericOutcomeContractDescriptor(_) => {
+                    (Vec::new(), false, "single-numeric")
+                }
+            };
             push_check(
                 &mut checks,
                 &mut failures,
