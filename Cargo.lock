@@ -157,6 +157,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-trait"
+version = "0.1.92"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -343,6 +354,7 @@ dependencies = [
  "hex-conservative 0.2.3",
  "hex_lit",
  "secp256k1",
+ "serde",
 ]
 
 [[package]]
@@ -361,6 +373,9 @@ name = "bitcoin-internals"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "30bdbe14aa07b06e6cfeffc529a1f099e5fbe249524f8125358604df99a4bed2"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bitcoin-internals"
@@ -390,6 +405,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9cb95693f371d089a4b5b6fc41c6f3ea6e01ee8c15388335dfac8ea685173b51"
 dependencies = [
  "bitcoin-consensus-encoding",
+ "serde",
 ]
 
 [[package]]
@@ -400,6 +416,7 @@ checksum = "bca4c7abb40c8817d77403c880988cfd484f23ab2365726afb2f798363e2c4a2"
 dependencies = [
  "bitcoin-io",
  "hex-conservative 0.2.3",
+ "serde",
 ]
 
 [[package]]
@@ -804,26 +821,59 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "ddk-dlc"
-version = "2.0.0-rc.8"
+version = "2.0.0-rc.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f5e49e4376fad02e7056ce6ef63576fcf0436e960fb0896d76945503c16ce34"
+checksum = "9f19e867ad874d75151e30586b82d98b4e61c7ced4512ecf11a2de8ba910214e"
 dependencies = [
  "bitcoin",
  "miniscript",
  "secp256k1-sys",
  "secp256k1-zkp",
+ "serde",
+]
+
+[[package]]
+name = "ddk-manager"
+version = "2.0.0-rc.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c3328138ebaab566c1d0174be77b286f9e52a6caffe2b91edfae8cb13316058"
+dependencies = [
+ "async-trait",
+ "bitcoin",
+ "ddk-dlc",
+ "ddk-messages",
+ "ddk-trie",
+ "futures",
+ "hex-conservative 0.1.2",
+ "lightning",
+ "once_cell",
+ "secp256k1-zkp",
+ "tracing",
 ]
 
 [[package]]
 name = "ddk-messages"
-version = "2.0.0-rc.8"
+version = "2.0.0-rc.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94f39ff3727586245b2ccbe5bd776dbe3330352433c19de06e07a647731715ad"
+checksum = "b9bbee86eddd3c75db380b898230d5602242d981b5ef15660026fadf0f94e28c"
 dependencies = [
  "bitcoin",
  "ddk-dlc",
  "lightning",
  "secp256k1-zkp",
+ "serde",
+]
+
+[[package]]
+name = "ddk-trie"
+version = "2.0.0-rc.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b739accf90243d7e4c556d77baf53808b17cc00ec8551783a4a69f0fb1b757ee"
+dependencies = [
+ "bitcoin",
+ "ddk-dlc",
+ "secp256k1-zkp",
+ "serde",
 ]
 
 [[package]]
@@ -1357,6 +1407,12 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hex-conservative"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "212ab92002354b4819390025006c897e8140934349e8635c9b077f47b4dcbd20"
 
 [[package]]
 name = "hex-conservative"
@@ -2925,6 +2981,7 @@ dependencies = [
  "bitcoin_hashes",
  "rand 0.8.6",
  "secp256k1-sys",
+ "serde",
 ]
 
 [[package]]
@@ -2946,6 +3003,7 @@ dependencies = [
  "rand 0.8.6",
  "secp256k1",
  "secp256k1-zkp-sys",
+ "serde",
 ]
 
 [[package]]
@@ -3287,6 +3345,17 @@ name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
+version = "3.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3848,6 +3917,7 @@ version = "0.2.0"
 dependencies = [
  "bitcoin",
  "ddk-dlc",
+ "ddk-manager",
  "ddk-messages",
  "hex",
  "lightning",

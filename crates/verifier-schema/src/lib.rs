@@ -141,6 +141,11 @@ pub struct OutcomeInfo {
     pub offerer_sats: String,
     /// Accepter payout in satoshis.
     pub accepter_sats: String,
+    /// Hex script the outcome's CET pays `accepterSats` to in place of the accepter's payout
+    /// script, set by the offer's payout script overrides record. Absent when the accepter is paid;
+    /// never the accepter's own script, which the verifier refuses as an override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepter_payout_override: Option<String>,
 }
 
 /// A named check suitable for machines and audit displays.

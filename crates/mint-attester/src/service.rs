@@ -284,7 +284,9 @@ pub fn receipt_for(
 
     // ponytail: payout addresses stay off-chain, where each co-signer checks its own, so only the
     // split is checked here: Lygos stakes nothing, the borrower takes the whole collateral unless
-    // the loan is liquidated, and the Lygos side takes it all when it is.
+    // the loan is liquidated, and the Lygos side takes it all when it is. That side's output may
+    // pay the liquidator's script instead (a payout script override); the liquidator checks its
+    // own CET, and the authorizer signed every CET txid into `termsHash`.
     if dlc.accept_collateral.as_deref() != Some("0") {
         return Err("Lygos must stake no collateral".to_owned());
     }
@@ -302,6 +304,16 @@ pub fn receipt_for(
         if split != Some((total, "0")) {
             return Err(format!(
                 "the {outcome} payout is not the whole collateral to one side"
+            ));
+        }
+        // Only a liquidation may pay someone in Lygos's place: every other outcome pays the
+        // borrower, and an override there would send it elsewhere. The verifier already refuses
+        // one on a CET paying Lygos nothing; this keeps the rule in Midnight's own policy.
+        if !outcome.starts_with("liquidated-by-")
+            && payout.is_some_and(|payout| payout.accepter_payout_override.is_some())
+        {
+            return Err(format!(
+                "the {outcome} payout must not be redirected by a payout script override"
             ));
         }
     }
@@ -634,6 +646,7 @@ mod tests {
                     label: label.to_owned(),
                     offerer_sats: borrower.to_owned(),
                     accepter_sats: lygos.to_owned(),
+                    accepter_payout_override: None,
                 }
             })
             .to_vec(),
@@ -658,6 +671,39 @@ mod tests {
             "e7d2aa696b1fa2e75e4afc253f5b8ee8b2ca0b0103328d248f8bd5572a56a353"
         );
         assert_eq!(receipt.terms_hash, terms_hash(&terms));
+    }
+
+    /// A liquidation CET that pays its liquidator directly, through a payout script override, is
+    /// still the Lygos side's whole payout.
+    #[test]
+    fn issues_a_receipt_when_the_liquidator_is_paid_directly() {
+        let terms = authorized();
+        let mut dlc = dlc();
+        for outcome in &mut dlc.outcomes {
+            if outcome.label == LIQUIDATOR {
+                outcome.accepter_payout_override = Some(format!("5120{}", "ab".repeat(32)));
+            }
+        }
+        let receipt =
+            receipt_for(&config(), &dlc, &announcement(&terms), &lock(), &terms).expect("receipt");
+        assert_eq!(receipt.terms_hash, terms_hash(&terms));
+    }
+
+    /// A borrower outcome is never redirected, whatever its split says.
+    #[test]
+    fn refuses_an_override_on_a_borrower_outcome() {
+        let terms = authorized();
+        for label in ["not-minted", "released"] {
+            let mut dlc = dlc();
+            for outcome in &mut dlc.outcomes {
+                if outcome.label == label {
+                    outcome.accepter_payout_override = Some(format!("5120{}", "ab".repeat(32)));
+                }
+            }
+            let error = receipt_for(&config(), &dlc, &announcement(&terms), &lock(), &terms)
+                .expect_err("an override on a borrower outcome");
+            assert!(error.contains("must not be redirected"), "{label}: {error}");
+        }
     }
 
     /// Any funding key may be Lygos's, as long as the authorizer signed the DLC that names it.

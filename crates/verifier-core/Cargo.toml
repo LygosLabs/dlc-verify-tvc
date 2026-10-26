@@ -19,6 +19,8 @@ verifier-schema = { path = "../verifier-schema" }
 workspace = true
 
 [dev-dependencies]
+# Only to check that reconstruction builds what DDK's own contract builder builds.
+ddk-manager = { version = "=2.0.0-rc.9", default-features = false, features = ["std"] }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }
 verifier-policy = { path = "../verifier-policy" }

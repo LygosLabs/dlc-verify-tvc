@@ -4,7 +4,7 @@ A deterministic Rust/DDK implementation of [Lygos DLC Verify](https://github.com
 
 For the current Lygos contract shape—one enumerated contract and one oracle—the Rust verifier reconstructs the funding transaction, CETs, and refund transaction; binds the signed oracle event descriptor to the contract outcomes; verifies the oracle announcement, adaptor signatures, refund signatures, contract linkage, and available funding witnesses; and returns the complete PR #9 result and policy schemas. Checked-in TypeScript goldens cover unsigned and fully signed real transcripts, including exact txids, output facts, contract ID, transcript hash, policy hash, verification digest, and every output field.
 
-The consensus-critical dependency line is pinned exactly to `ddk-messages = 2.0.0-rc.8`, `ddk-dlc = 2.0.0-rc.8`, `bitcoin = 0.32.6`, `lightning = 0.2.2`, and `secp256k1-zkp = 0.11.0`. This implementation does not use `rust-dlc`.
+The consensus-critical dependency line is pinned exactly to `ddk-messages = 2.0.0-rc.9`, `ddk-dlc = 2.0.0-rc.9`, `bitcoin = 0.32.6`, `lightning = 0.2.2`, and `secp256k1-zkp = 0.11.0`. This implementation does not use `rust-dlc`.
 
 ## API
 
@@ -121,6 +121,10 @@ Once per environment, from `tvc-configs/*.mint-attester.example.json`:
 
 The `Verifier` constructor takes the signing half of the quorum public key: the second 65-byte SEC1 point of the 130-byte key, as `signerX` and `signerY`.
 
+## Payout script overrides
+
+An offer may carry one DDK 2.0.0-rc.9 `PayoutScriptOverrides` record (TLV type 65005), which makes the CET of each outcome it names pay a third party's script, a liquidator for instance, in place of the accepter's payout script. Reconstruction applies it as `ddk-manager` does: the covered CET is rebuilt with the override script, and funding reserves the CET fee for the longest script the accepter's output can pay. An override must name an outcome of the descriptor whose CET pays the accepter at least the 1,000-sat dust limit, and no outcome may be overridden twice. The record's bytes are in the transcript hash, so the verifier is stricter than DDK about records that build the same transactions as another: the record must be canonically encoded, name at least one override, list its overrides in the descriptor's outcome order, and pay neither party's payout script. Overrides are also supported only on a contract whose descriptor lists its outcomes in the oracle announcement's signed order (the descriptor's own order is in no signature), that refunds to the accepter (contract flag `0x01`) with distinct party payout scripts, and only on a CET that pays the offerer nothing; the first outcome in descriptor order whose CET pays anyone but the accepter must pay the offerer and not be overridden. The refund then fixes the accepter's own script, that first outcome fixes the offerer's, and an overridden CET's single output fixes its override script; otherwise a script could trade places with another, or an outcome be read as the other party's, and build the same transactions. A Midnight DLC has that shape when its descriptor follows its announcement, whose borrower outcomes come before its liquidation outcomes. The overrides record, and which party or override each CET output pays, are then determined by the signed transactions and the oracle's signed outcome order; other transcript fields, such as an unused change script or the serial ids, are not, with or without a record. An offer writer has to follow these rules too, or its offer is refused. Any other TLV record, and any record on an accept or sign message, is refused as trailing data. Each overridden outcome reports its script as `accepterPayoutOverride`, and a policy whose lender is the accepter credits the lender nothing on it. A test checks the funding transaction, CETs and refund against `ddk-manager`'s own builder byte for byte.
+
 ## Refund mode compatibility
 
 The verifier accepts contract flags `0x00` (refund each party its collateral) and
@@ -129,6 +133,6 @@ flag is passed to DDK transaction reconstruction, and both refund signatures
 are verified against that transaction. The existing refund-pays-lender policy is
 unchanged: supporting a flag does not approve a lender role or a loan policy.
 
-DDK tests the flag-one refund layout itself; this repo tests only that unknown
-bits are refused. The frozen TypeScript goldens remain the flag-zero compatibility
+DDK tests the flag-one refund layout itself; this repo tests that unknown bits
+are refused, and builds flag-one contracts only in its payout override tests. The frozen TypeScript goldens remain the flag-zero compatibility
 target; this extension does not claim TypeScript flag-one parity.
