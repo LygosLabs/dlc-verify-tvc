@@ -12,6 +12,8 @@
     "mainnet",
     "--lygos-authorizer",
     "REPLACE_WITH_MIDNIGHT_AUTHORIZER_ADDRESS",
+    "--lygos-funding-pubkey",
+    "REPLACE_WITH_MIDNIGHT_FORDEFI_FUNDING_PUBKEY",
     "--oracle-pubkey",
     "REPLACE_WITH_MIDNIGHT_ORACLE_XONLY_PUBKEY"
   ],

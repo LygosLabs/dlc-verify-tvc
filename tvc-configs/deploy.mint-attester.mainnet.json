@@ -8,6 +8,7 @@
     "--port", "3000",
     "--network", "mainnet",
     "--lygos-authorizer", "REPLACE_WITH_MAINNET_MIDNIGHT_AUTHORIZER_ADDRESS",
+    "--lygos-funding-pubkey", "REPLACE_WITH_MAINNET_MIDNIGHT_FORDEFI_FUNDING_PUBKEY",
     "--oracle-pubkey", "REPLACE_WITH_MAINNET_ORACLE_PUBKEY_XONLY"
   ],
   "expectedPivotDigest": "REPLACE_WITH_EXECUTABLE_DIGEST",
