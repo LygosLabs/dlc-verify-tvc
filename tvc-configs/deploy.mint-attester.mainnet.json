@@ -8,7 +8,7 @@
     "--port", "3000",
     "--network", "mainnet",
     "--lygos-authorizer", "REPLACE_WITH_MAINNET_MIDNIGHT_AUTHORIZER_ADDRESS",
-    "--oracle-pubkey", "REPLACE_WITH_MAINNET_ORACLE_PUBKEY_XONLY"
+    "--midnight-oracle-keys", "REPLACE_WITH_MAINNET_MIDNIGHT_ORACLE_KEYS"
   ],
   "expectedPivotDigest": "REPLACE_WITH_EXECUTABLE_DIGEST",
   "dangerousDeployDebugMode": false,
