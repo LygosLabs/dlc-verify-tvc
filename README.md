@@ -125,6 +125,31 @@ Once per environment, from `tvc-configs/*.mint-attester.example.json`:
 
 The `Verifier` constructor takes the signing half of the quorum public key: the second 65-byte SEC1 point of the 130-byte key, as `signerX` and `signerY`.
 
+### Local (orange-grove dev stack)
+
+Outside TVC the binary needs no QOS: it reads the quorum key from `--quorum-file`. `dev/mint-attester/dev-only-quorum.key` is a fixed quorum key for local development only. It is public, so a `Verifier` that trusts it accepts receipts anyone can sign; never deploy it outside a local chain. The file is a QOS master seed, `sha256("lygos.dev.mint-attester")` in hex, and QOS derives the receipt signing key from it with HKDF-SHA512. The values below are what the attester signs with, pinned by `crates/mint-attester/tests/dev_quorum_key.rs`:
+
+| | |
+|---|---|
+| Signing scalar (`ENCLAVE_P256_KEY` in lygos-contracts `Deploy.s.sol`) | `0x1c61464af96b6a97655f9a0c51bf5c59ef12a98f56c216e14360875ebb70aa2e` |
+| Public key x (`ENCLAVE_X`, the `Verifier`'s `signerX`) | `0xeab1fb2e525b4744a49e099469697402f422646db4747e0cb2340d35c3b0b9c1` |
+| Public key y (`ENCLAVE_Y`, the `Verifier`'s `signerY`) | `0x4b839e4f3117435cdc62dd8e63c147130f8adef488482af54746e591b4c35941` |
+
+From the repository root, with `MIDNIGHT_ORACLE_KEYS` as orange-grove sets it and `LYGOS_AUTHORIZER` the EVM address of the dev Midnight authorizer, whose key signs each request's `authorization`:
+
+```sh
+cargo run --locked -p mint-attester -- \
+  --quorum-file dev/mint-attester/dev-only-quorum.key \
+  --host 0.0.0.0 --port 3000 \
+  --network regtest --allow-insecure-network --min-confirmations 1 \
+  --midnight-oracle-keys "$MIDNIGHT_ORACLE_KEYS" \
+  --lygos-authorizer "$LYGOS_AUTHORIZER"
+```
+
+Confirmations count headers after the funding block's, so with `--min-confirmations 1` the lock proof must carry the funding block's header and at least one after it: mine one block past the funding block before attesting. That is two confirmations as Bitcoin Core counts them; lygos-contracts' `MIN_CONFIRMATIONS` (default 1) counts the same way as the attester.
+
+It builds with `cargo build --locked -p mint-attester` in a stock `rust:1.x-bookworm` image: rustup installs the toolchain `rust-toolchain.toml` pins (1.94), and the native dependencies (`ring`, `secp256k1-sys`, `secp256k1-zkp-sys`) build with the C compiler the image ships. No other system packages are needed.
+
 ## Payout script overrides
 
 An offer may carry one DDK 2.0.0-rc.9 `PayoutScriptOverrides` record (TLV type 65005), which makes the CET of each outcome it names pay a third party's script, a liquidator for instance, in place of the accepter's payout script. Reconstruction applies it as `ddk-manager` does: the covered CET is rebuilt with the override script, and funding reserves the CET fee for the longest script the accepter's output can pay. An override must name an outcome of the descriptor whose CET pays the accepter at least the 1,000-sat dust limit, and no outcome may be overridden twice. The record's bytes are in the transcript hash, so the verifier is stricter than DDK about records that build the same transactions as another: the record must be canonically encoded, name at least one override, list its overrides in the descriptor's outcome order, and pay neither party's payout script. Overrides are also supported only on a contract whose descriptor lists its outcomes in the oracle announcement's signed order (the descriptor's own order is in no signature), that refunds to the accepter (contract flag `0x01`) with distinct party payout scripts, and only on a CET that pays the offerer nothing; the first outcome in descriptor order whose CET pays anyone but the accepter must pay the offerer and not be overridden. The refund then fixes the accepter's own script, that first outcome fixes the offerer's, and an overridden CET's single output fixes its override script; otherwise a script could trade places with another, or an outcome be read as the other party's, and build the same transactions. A Midnight DLC has that shape when its descriptor follows its announcement, whose borrower outcomes come before its liquidation outcomes. The overrides record, and which party or override each CET output pays, are then determined by the signed transactions and the oracle's signed outcome order; other transcript fields, such as an unused change script or the serial ids, are not, with or without a record. An offer writer has to follow these rules too, or its offer is refused. Any other TLV record, and any record on an accept or sign message, is refused as trailing data. Each overridden outcome reports its script as `accepterPayoutOverride`, and a policy whose lender is the accepter credits the lender nothing on it. A test checks the funding transaction, CETs and refund against `ddk-manager`'s own builder byte for byte.
