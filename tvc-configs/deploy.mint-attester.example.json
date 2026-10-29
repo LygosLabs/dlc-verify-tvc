@@ -12,8 +12,8 @@
     "mainnet",
     "--lygos-authorizer",
     "REPLACE_WITH_MIDNIGHT_AUTHORIZER_ADDRESS",
-    "--oracle-pubkey",
-    "REPLACE_WITH_MIDNIGHT_ORACLE_XONLY_PUBKEY"
+    "--midnight-oracle-keys",
+    "REPLACE_WITH_MIDNIGHT_ORACLE_KEYS"
   ],
   "expectedPivotDigest": "REPLACE_WITH_TVC_APP_ELF_SHA256",
   "dangerousDeployDebugMode": false,
