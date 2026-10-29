@@ -145,10 +145,16 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
 
     let proof = LockProof {
         tx: deserialize_hex(&request.tx).map_err(|error| format!("invalid tx: {error}"))?,
+        // No funding output means the transcript did not rebuild; say why.
         vout: dlc
             .fund_output_index
             .and_then(|index| u32::try_from(index).ok())
-            .ok_or("the DLC has no funding output")?,
+            .ok_or_else(|| {
+                format!(
+                    "the DLC does not rebuild: {}",
+                    dlc.error.as_deref().unwrap_or("no funding output")
+                )
+            })?,
         tx_index: request.tx_index,
         merkle_branch: request
             .merkle_branch
