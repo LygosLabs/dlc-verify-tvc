@@ -25,7 +25,9 @@ use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 use tower_http::timeout::TimeoutLayer;
-use verifier_core::{OfferAnnouncement, offer_announcement, verify_dlc_compatibility};
+use verifier_core::{
+    OfferAnnouncement, funding_input_count, offer_announcement, verify_dlc_compatibility,
+};
 use verifier_schema::{DlcVerifyResult, VerificationStatus};
 
 /// What the enclave pins. All of it comes from launch arguments the QOS manifest measures, except
@@ -33,7 +35,8 @@ use verifier_schema::{DlcVerifyResult, VerificationStatus};
 pub struct Config {
     /// Bitcoin network the locks are on.
     pub network: Network,
-    /// The Midnight authorizer's EVM address: every DLC's `termsHash` must carry its signature.
+    /// The Midnight authorizer's EVM address: every DLC's offer and accept must carry its
+    /// signature.
     pub lygos_authorizer: [u8; 20],
     /// The Midnight oracle's key. Typed so an empty pin, which verifier-core reads as "no
     /// expected oracle", cannot be constructed.
@@ -80,7 +83,7 @@ pub struct AttestRequest {
     pub announced_at: u64,
     /// `Verifier` address the receipt is signed for.
     pub verifier: String,
-    /// The Midnight authorizer's EIP-712 signature over this DLC's `termsHash`, `r ‖ s ‖ v`.
+    /// The Midnight authorizer's EIP-712 signature over this DLC's offer and accept, `r ‖ s ‖ v`.
     /// Optional in the body so a client that omits it is told why, not that a field is missing.
     #[serde(default)]
     pub authorization: String,
@@ -101,8 +104,6 @@ pub struct LoanTerms {
     pub mint_deadline: u64,
     /// Timestamp of the block the oracle froze the liquidator set at.
     pub announced_at: u64,
-    /// The Midnight authorizer's signature over `termsHash`.
-    pub authorization: [u8; 65],
 }
 
 /// Check a request end to end and return the signed receipt as JSON.
@@ -114,6 +115,7 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
     if request.authorization.is_empty() {
         return Err("the request carries no Midnight authorization".to_owned());
     }
+    let authorization = fixed("authorization", &request.authorization)?;
     let terms = LoanTerms {
         market: bytes("market", &request.market)?,
         chain_id: request.chain_id,
@@ -121,15 +123,35 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
         controller: fixed("controller", &request.controller)?,
         mint_deadline: request.mint_deadline,
         announced_at: request.announced_at,
-        authorization: fixed("authorization", &request.authorization)?,
     };
     let verifier = fixed("verifier", &request.verifier)?;
 
-    // The cheap parse first: reconstruction allocates per outcome, and a Midnight list is a
-    // handful of entries, so an oversized one is refused before any signature work.
+    // Lygos's approval before any DLC work: it costs two hashes and one key recovery, so a request
+    // Lygos did not approve is refused before it can hold a slot for long.
+    let offer = message("offer", &request.offer)?;
+    let accept = message("accept", &request.accept)?;
+    message("sign", &request.sign)?;
+    let approval = authorizer::digest(
+        terms.chain_id,
+        &terms.originator,
+        &authorizer::message_hash(&offer),
+        &authorizer::message_hash(&accept),
+    );
+    if authorizer::signer(&approval, &authorization)? != config.lygos_authorizer {
+        return Err("the Midnight authorizer did not sign this offer and accept".to_owned());
+    }
+
+    // Then the cheap parses: reconstruction allocates per outcome and hashes the funding
+    // transaction per input, and a Midnight DLC has a handful of each, so an oversized one is
+    // refused before any signature work.
     let announcement = offer_announcement(&request.offer).map_err(|error| error.to_string())?;
     if announcement.outcomes.len() > MAX_OUTCOMES {
         return Err(format!("more than {MAX_OUTCOMES} outcomes"));
+    }
+    let inputs =
+        funding_input_count(&request.offer, &request.accept).map_err(|error| error.to_string())?;
+    if inputs > MAX_FUNDING_INPUTS {
+        return Err(format!("more than {MAX_FUNDING_INPUTS} funding inputs"));
     }
     let dlc = verify_dlc_compatibility(
         &request.offer,
@@ -193,7 +215,8 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
     }))
 }
 
-/// Apply the Midnight policy to a verified transcript and a proven lock.
+/// Apply the Midnight policy to a verified transcript and a proven lock. Lygos's approval of the
+/// offer and accept is `attest`'s first check, so it is not repeated here.
 ///
 /// # Errors
 ///
@@ -229,8 +252,9 @@ pub fn receipt_for(
     }
 
     // Lygos funds from a fresh key per contract, so its key is whichever the accepter used; the
-    // authorization below is what makes it Lygos's. The refund is the trusted last resort and
-    // must pay the Lygos side: the whole funding output to the accepter.
+    // authorization `attest` checked over the offer and accept is what makes it Lygos's. The
+    // refund is the trusted last resort and must pay the Lygos side: the whole funding output to
+    // the accepter.
     let offerer = dlc.offerer_funding_pubkey.as_deref().unwrap_or_default();
     let lygos = dlc.accepter_funding_pubkey.as_deref().unwrap_or_default();
     if lygos.is_empty() || offerer == lygos {
@@ -286,7 +310,7 @@ pub fn receipt_for(
     // split is checked here: Lygos stakes nothing, the borrower takes the whole collateral unless
     // the loan is liquidated, and the Lygos side takes it all when it is. That side's output may
     // pay the liquidator's script instead (a payout script override); the liquidator checks its
-    // own CET, and the authorizer signed every CET txid into `termsHash`.
+    // own CET, and the authorizer signed the offer and accept that fix every CET.
     if dlc.accept_collateral.as_deref() != Some("0") {
         return Err("Lygos must stake no collateral".to_owned());
     }
@@ -352,10 +376,6 @@ pub fn receipt_for(
         refund_txid: &txid(dlc.refund_tx_id.as_deref())?,
     }
     .hash();
-    let approval = authorizer::digest(terms.chain_id, &terms.originator, &terms_hash);
-    if authorizer::signer(&approval, &terms.authorization)? != config.lygos_authorizer {
-        return Err("the Midnight authorizer did not sign this DLC's terms".to_owned());
-    }
 
     Ok(Receipt {
         claim_id: lock.claim_id,
@@ -423,6 +443,16 @@ fn bytes(field: &str, value: &str) -> Result<Vec<u8>, String> {
         .map_err(|error| format!("invalid {field}: {error}"))
 }
 
+/// A DLC message's bytes, refused unread when it is larger than a Midnight DLC needs.
+fn message(field: &str, value: &str) -> Result<Vec<u8>, String> {
+    if value.strip_prefix("0x").unwrap_or(value).len() > 2 * MAX_MESSAGE_BYTES {
+        return Err(format!(
+            "the {field} is larger than {MAX_MESSAGE_BYTES} bytes"
+        ));
+    }
+    bytes(field, value)
+}
+
 fn fixed<const N: usize>(field: &str, value: &str) -> Result<[u8; N], String> {
     bytes(field, value)?
         .try_into()
@@ -435,6 +465,11 @@ static ATTEST_SLOTS: Semaphore = Semaphore::const_new(8);
 const REFUND_TO_ACCEPTER_FLAG: u8 = 0x01;
 /// A Midnight outcome list is `not-minted`, `released`, and one entry per liquidator.
 const MAX_OUTCOMES: usize = 2 + midnight::MAX_LIQUIDATORS;
+/// A Midnight DLC is funded by the borrower's few coins; Lygos stakes nothing.
+const MAX_FUNDING_INPUTS: usize = 64;
+/// The largest DLC message: an accept or sign carries one adaptor signature per outcome (about
+/// 17 KiB at 102), and an offer the borrower's coins with their previous transactions.
+const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 /// How long a request may take to deliver its body once it holds a slot.
 const BODY_READ_LIMIT: Duration = Duration::from_secs(5);
 
@@ -534,7 +569,6 @@ mod tests {
             controller: [0xc0; 20],
             mint_deadline: 1_790_000_000,
             announced_at: 1_789_000_000,
-            authorization: [0; 65],
         }
     }
 
@@ -564,18 +598,18 @@ mod tests {
         .hash()
     }
 
-    /// `terms`, signed by `secret` for `terms_hash`.
-    fn signed(mut terms: LoanTerms, terms_hash: &[u8; 32], secret: &[u8; 32]) -> LoanTerms {
-        let digest = authorizer::digest(terms.chain_id, &terms.originator, terms_hash);
-        terms.authorization = authorizer::sign(&digest, secret);
-        terms
-    }
-
-    /// The fixture terms with the authorizer's signature over the fixture DLC.
-    fn authorized() -> LoanTerms {
-        let terms = terms();
-        let hash = terms_hash(&terms);
-        signed(terms, &hash, &AUTHORIZER_SECRET)
+    /// `request` signed by `secret` as the authorizer signs: its offer and accept, in its chain
+    /// and Originator's domain.
+    fn signed(mut request: AttestRequest, secret: &[u8; 32]) -> AttestRequest {
+        let hash = |message: &str| authorizer::message_hash(&hex::decode(message).expect("hex"));
+        let digest = authorizer::digest(
+            request.chain_id,
+            &fixed("originator", &request.originator).expect("originator"),
+            &hash(&request.offer),
+            &hash(&request.accept),
+        );
+        request.authorization = format!("0x{}", hex::encode(authorizer::sign(&digest, secret)));
+        request
     }
 
     fn lock() -> Lock {
@@ -660,7 +694,7 @@ mod tests {
 
     #[test]
     fn issues_a_receipt_for_a_midnight_dlc() {
-        let terms = authorized();
+        let terms = terms();
         let receipt = receipt_for(&config(), &dlc(), &announcement(&terms), &lock(), &terms)
             .expect("receipt");
         assert_eq!(receipt.sats, 50_000_000);
@@ -677,7 +711,7 @@ mod tests {
     /// still the Lygos side's whole payout.
     #[test]
     fn issues_a_receipt_when_the_liquidator_is_paid_directly() {
-        let terms = authorized();
+        let terms = terms();
         let mut dlc = dlc();
         for outcome in &mut dlc.outcomes {
             if outcome.label == LIQUIDATOR {
@@ -692,7 +726,7 @@ mod tests {
     /// A borrower outcome is never redirected, whatever its split says.
     #[test]
     fn refuses_an_override_on_a_borrower_outcome() {
-        let terms = authorized();
+        let terms = terms();
         for label in ["not-minted", "released"] {
             let mut dlc = dlc();
             for outcome in &mut dlc.outcomes {
@@ -706,41 +740,10 @@ mod tests {
         }
     }
 
-    /// Any funding key may be Lygos's, as long as the authorizer signed the DLC that names it.
-    #[test]
-    fn needs_the_authorizer_to_sign_these_exact_terms() {
-        let (dlc, lock, terms) = (dlc(), lock(), terms());
-        let announcement = announcement(&terms);
-        let hash = terms_hash(&terms);
-        let attempt = |terms: &LoanTerms| {
-            receipt_for(&config(), &dlc, &announcement, &lock, terms).expect_err("refused")
-        };
-        let unsigned = attempt(&terms);
-        assert!(unsigned.contains("invalid authorization"), "{unsigned}");
-        let stranger = attempt(&signed(terms.clone(), &hash, &[6; 32]));
-        assert!(stranger.contains("did not sign"), "{stranger}");
-        let mut other_dlc = hash;
-        other_dlc[0] ^= 1;
-        let other = attempt(&signed(terms.clone(), &other_dlc, &AUTHORIZER_SECRET));
-        assert!(other.contains("did not sign"), "{other}");
-        // Signed for another chain's domain: the same terms hash does not carry over.
-        let mut elsewhere = signed(
-            LoanTerms {
-                chain_id: 1,
-                ..terms.clone()
-            },
-            &hash,
-            &AUTHORIZER_SECRET,
-        );
-        elsewhere.chain_id = terms.chain_id;
-        assert!(attempt(&elsewhere).contains("did not sign"));
-        assert!(receipt_for(&config(), &dlc, &announcement, &lock, &authorized()).is_ok());
-    }
-
     #[test]
     fn refuses_anything_else() {
         let refused = |edit: fn(&mut DlcVerifyResult, &mut LoanTerms, &mut Lock)| {
-            let (mut dlc, mut terms, mut lock) = (dlc(), authorized(), lock());
+            let (mut dlc, mut terms, mut lock) = (dlc(), terms(), lock());
             // The announcement is fixed before the edit, as the oracle signs it before the request.
             let announcement = announcement(&terms);
             edit(&mut dlc, &mut terms, &mut lock);
@@ -755,17 +758,13 @@ mod tests {
                 .contains("funding keys")
         );
         assert!(refused(|d, _, _| d.accepter_funding_pubkey = None).contains("funding keys"));
-        // Swapping the sides changes the terms the authorizer signed.
+        // Swapping the sides moves the borrower's key, which the event id names.
         assert!(
             refused(|d, _, _| {
                 d.accepter_funding_pubkey = Some(BORROWER.to_owned());
                 d.offerer_funding_pubkey = Some(LYGOS.to_owned());
             })
             .contains("event id")
-        );
-        assert!(
-            refused(|d, _, _| d.refund_tx_id = Some(Txid::from_byte_array([8; 32]).to_string()))
-                .contains("did not sign")
         );
         assert!(
             refused(|d, _, _| d.refund_locktime = Some(MATURITY + 14 * 24 * 60 * 60 - 1))
@@ -778,15 +777,9 @@ mod tests {
             ..config()
         };
         assert!(
-            receipt_for(
-                &strict,
-                &dlc(),
-                &announcement(&terms()),
-                &lock(),
-                &authorized()
-            )
-            .expect_err("one confirmation is below the floor")
-            .contains("at least 6")
+            receipt_for(&strict, &dlc(), &announcement(&terms()), &lock(), &terms())
+                .expect_err("one confirmation is below the floor")
+                .contains("at least 6")
         );
         assert!(refused(|_, t, _| t.controller = [0xbd; 20]).contains("event id"));
         assert!(refused(|_, t, _| t.originator = [0xbd; 20]).contains("event id"));
@@ -803,7 +796,7 @@ mod tests {
         let mut each_party = announcement(&terms());
         each_party.contract_flags = 0;
         assert!(
-            receipt_for(&config(), &dlc(), &each_party, &lock(), &authorized())
+            receipt_for(&config(), &dlc(), &each_party, &lock(), &terms())
                 .expect_err("must be refused")
                 .contains("refund to the accepter")
         );
@@ -817,6 +810,18 @@ mod tests {
         assert!(refused(|d, _, _| drop(d.outcomes.pop())).contains("payout"));
         assert!(refused(|d, _, _| d.cet_locktime = Some(BLOCK_TIME + 1)).contains("CET locktime"));
         assert!(refused(|d, _, _| d.cet_locktime = Some(900_000)).contains("CET locktime"));
+    }
+
+    /// `termsHash` names the refund: a DLC with another refund carries other terms. That DLC is
+    /// another accept, which the authorizer did not approve.
+    #[test]
+    fn terms_hash_names_the_refund() {
+        let terms = terms();
+        let mut dlc = dlc();
+        dlc.refund_tx_id = Some(Txid::from_byte_array([8; 32]).to_string());
+        let receipt =
+            receipt_for(&config(), &dlc, &announcement(&terms), &lock(), &terms).expect("receipt");
+        assert_ne!(receipt.terms_hash, terms_hash(&terms));
     }
 
     #[test]
@@ -909,9 +914,93 @@ mod tests {
             mint_deadline: 1_790_000_000,
             announced_at: 1_789_000_000,
             verifier: hex0x(&[0x11; 20]),
-            authorization: hex0x(&[0; 65]),
+            authorization: String::new(),
         };
-        (config, request)
+        (config, signed(request, &AUTHORIZER_SECRET))
+    }
+
+    /// The fixture request with its offer edited, approved again.
+    fn with_offer(edit: impl FnOnce(&mut ddk_messages::OfferDlc)) -> AttestRequest {
+        use lightning::util::ser::{Readable, Writeable};
+        let request = fixture_request().1;
+        let bytes = hex::decode(&request.offer).expect("hex");
+        let mut offer: ddk_messages::OfferDlc =
+            Readable::read(&mut std::io::Cursor::new(bytes)).expect("offer");
+        edit(&mut offer);
+        let offer = hex::encode(offer.encode());
+        signed(AttestRequest { offer, ..request }, &AUTHORIZER_SECRET)
+    }
+
+    /// Lygos's approval is the first check: a request it did not approve is refused before its
+    /// DLC is parsed, and an approval names one offer and one accept in one chain's domain.
+    #[test]
+    fn needs_the_authorizer_to_sign_this_offer_and_accept() {
+        let config = fixture_request().0;
+        let attempt = |request: &AttestRequest| attest(&config, request).expect_err("refused");
+        let request = || fixture_request().1;
+        // Approved, so it reaches the policy.
+        assert!(attempt(&request()).contains("another Bitcoin network"));
+
+        let stranger = signed(request(), &[6; 32]);
+        assert!(attempt(&stranger).contains("did not sign"));
+        let mut elsewhere = signed(
+            AttestRequest {
+                chain_id: 1,
+                ..request()
+            },
+            &AUTHORIZER_SECRET,
+        );
+        elsewhere.chain_id = 8453;
+        assert!(attempt(&elsewhere).contains("did not sign"));
+        // The hashes are two fields, in order: an approval of the messages swapped is another.
+        let swapped = signed(
+            AttestRequest {
+                offer: request().accept,
+                accept: request().offer,
+                ..request()
+            },
+            &AUTHORIZER_SECRET,
+        );
+        let mut reordered = request();
+        reordered.authorization = swapped.authorization;
+        assert!(attempt(&reordered).contains("did not sign"));
+        // Another accept, even one that does not parse, is refused at the approval.
+        let mut other_accept = request();
+        other_accept.accept = "00".to_owned();
+        assert!(attempt(&other_accept).contains("did not sign"));
+
+        let mut garbage = request();
+        garbage.authorization = format!("0x{}", "00".repeat(65));
+        assert!(attempt(&garbage).contains("invalid authorization"));
+        // A message larger than a Midnight DLC needs is refused unread.
+        let mut oversized = request();
+        oversized.offer = "00".repeat(MAX_MESSAGE_BYTES + 1);
+        assert_eq!(
+            attempt(&oversized),
+            format!("the offer is larger than {MAX_MESSAGE_BYTES} bytes")
+        );
+    }
+
+    /// More funding inputs than a Midnight DLC needs are refused before any signature work.
+    #[test]
+    fn caps_the_funding_inputs() {
+        let config = fixture_request().0;
+        let with_inputs = |count: usize| {
+            with_offer(|offer| {
+                let input = offer.funding_inputs[0].clone();
+                offer.funding_inputs = vec![input; count];
+            })
+        };
+        let unfunded = with_inputs(0);
+        let accept_inputs = funding_input_count(&unfunded.offer, &unfunded.accept).expect("inputs");
+        let full = MAX_FUNDING_INPUTS - accept_inputs;
+        let error = attest(&config, &with_inputs(full)).expect_err("refused later");
+        assert!(!error.starts_with("more than"), "{error}");
+        let error = attest(&config, &with_inputs(full + 1)).expect_err("one too many");
+        assert_eq!(
+            error,
+            format!("more than {MAX_FUNDING_INPUTS} funding inputs")
+        );
     }
 
     /// `attest` end to end up to the policy: the real mainnet lock proof in explorer byte order
@@ -946,33 +1035,26 @@ mod tests {
     #[test]
     fn a_full_liquidator_set_fits_under_the_outcome_cap() {
         use ddk_messages::{
-            OfferDlc,
             contract_msgs::ContractInfo,
             oracle_msgs::{EventDescriptor, OracleInfo},
         };
-        use lightning::util::ser::{Readable, Writeable};
-        let (config, request) = fixture_request();
+        let config = fixture_request().0;
         let with_outcomes = |count: usize| {
-            let bytes = hex::decode(&request.offer).expect("hex");
-            let mut offer: OfferDlc =
-                Readable::read(&mut std::io::Cursor::new(bytes)).expect("offer");
-            if let ContractInfo::SingleContractInfo(single) = &mut offer.contract_info
-                && let OracleInfo::Single(oracle) = &mut single.contract_info.oracle_info
-                && let EventDescriptor::EnumEvent(descriptor) =
-                    &mut oracle.oracle_announcement.oracle_event.event_descriptor
-            {
-                descriptor.outcomes = ["not-minted".to_owned(), "released".to_owned()]
-                    .into_iter()
-                    .chain((1..count - 1).map(|i| format!("liquidated-by-0x{i:040x}")))
-                    .collect();
-            }
-            let offer = hex::encode(offer.encode());
-            let parsed = offer_announcement(&offer).expect("announcement");
+            let request = with_offer(|offer| {
+                if let ContractInfo::SingleContractInfo(single) = &mut offer.contract_info
+                    && let OracleInfo::Single(oracle) = &mut single.contract_info.oracle_info
+                    && let EventDescriptor::EnumEvent(descriptor) =
+                        &mut oracle.oracle_announcement.oracle_event.event_descriptor
+                {
+                    descriptor.outcomes = ["not-minted".to_owned(), "released".to_owned()]
+                        .into_iter()
+                        .chain((1..count - 1).map(|i| format!("liquidated-by-0x{i:040x}")))
+                        .collect();
+                }
+            });
+            let parsed = offer_announcement(&request.offer).expect("announcement");
             assert_eq!(parsed.outcomes.len(), count);
-            AttestRequest {
-                offer,
-                ..fixture_request().1
-            }
+            request
         };
         let full = 2 + midnight::MAX_LIQUIDATORS;
         // The edited offer no longer rebuilds, so it is refused, but past the cap.
