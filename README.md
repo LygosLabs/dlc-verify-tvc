@@ -76,9 +76,13 @@ An empty `qosCommit` records the value actually committed by the current QOS man
 - `GET /health` — liveness.
 - `POST /v1/attest` — DLC transcript, lock proof, and loan terms in; signed receipt out, or `422` with the reason for refusal.
 
-Everything the attester pins is a launch argument, so the QOS manifest measures it: `--network`, `--lygos-authorizer`, `--oracle-pubkey`, `--min-confirmations` (default 6). Any network other than mainnet is refused unless `--allow-insecure-network` is also passed, because its proof of work is free to forge. The SPV check proves that work was done on a chain containing the funding transaction, not that the chain is Bitcoin's, so `--min-confirmations` is the enclave's own floor on what a forged lock costs; the `Verifier` contract may require more, never less. Egress stays disabled; a relayer supplies the headers and Merkle proof. A Midnight DLC must refund to the accepter (contract flag `0x01`), and its two funding keys must differ; anything else is refused. The accepter's key is Lygos's because the authorizer signed it into `termsHash`, below.
+Everything the attester pins is a launch argument, so the QOS manifest measures it: `--network`, `--lygos-authorizer`, `--midnight-oracle-keys`, `--min-confirmations` (default 6). Any network other than mainnet is refused unless `--allow-insecure-network` is also passed, because its proof of work is free to forge. The SPV check proves that work was done on a chain containing the funding transaction, not that the chain is Bitcoin's, so `--min-confirmations` is the enclave's own floor on what a forged lock costs; the `Verifier` contract may require more, never less. Egress stays disabled; a relayer supplies the headers and Merkle proof. A Midnight DLC must refund to the accepter (contract flag `0x01`), and its two funding keys must differ; anything else is refused. The accepter's key is Lygos's because the authorizer signed it into `termsHash`, below.
 
 Lygos funds every DLC from a fresh key (dlcd-rs derives one per contract; a Fordefi key differs per vault), so the attester pins who approves a Midnight DLC, not which key funds it. `--lygos-authorizer` is an EVM address. Each request carries `authorization`, its 65-byte `r ‖ s ‖ v` EIP-712 signature of `MidnightAuthorization(bytes32 termsHash)` under the domain `("Lygos Midnight Authorizer", "1", chainId, originator)`. `termsHash` is the one the receipt carries, so the signature names one funding outpoint, both funding keys, the announcement, and every CET and the refund. Lygos signs it when it co-signs the DLC: first locks, every roll rung, every splice. See WP §5.
+
+The Midnight oracle signs with one key per calendar quarter. `--midnight-oracle-keys` takes the same line as orange-grove's `MIDNIGHT_ORACLE_KEYS`, so the key ceremony's output feeds both: comma-separated `keyVersion:xonlyHex` pairs, each split at its last `:`, e.g. `midnight-2026Q4-mainnet-v1:<key>,midnight-2027Q1-mainnet-v1:<key>`. Every key version must name its quarter: `midnight-YYYYQn`, then `-`, `:`, or nothing. One key per quarter. An announcement must be signed by the key pinned for its market's maturity quarter (UTC); a quarter with no key, or any other key, is refused, so one quarter's key cannot sign for another. A new quarter's key needs a new deployment.
+
+The event id commits to orange-grove's `requestId` for the announcement, sent in the attest body as a lowercase hyphenated UUID: `sha256("lygos-midnight-v1" // chainId // originator // marketId // requestId // liquidators // controller // mintDeadline // announcedAt)`, named `midnight-<DDMMMYY>-<digest>`. The borrower's funding key is not in the event id, because ddk generates it after the announcement exists; `termsHash` binds both funding keys from the DLC instead.
 
 Build the image with `make out/mint-attester/index.json`. CI publishes it as `ghcr.io/lygoslabs/mint-attester` and prints the image digest and executable digest.
 
@@ -120,6 +124,31 @@ Once per environment, from `tvc-configs/*.mint-attester.example.json`:
 5. Give the `Verifier` for that environment the app's quorum key, then merge to the branch, or run `scripts/tvc-release.sh <env> <image> <digest>` locally.
 
 The `Verifier` constructor takes the signing half of the quorum public key: the second 65-byte SEC1 point of the 130-byte key, as `signerX` and `signerY`.
+
+### Local (orange-grove dev stack)
+
+Outside TVC the binary needs no QOS: it reads the quorum key from `--quorum-file`. `dev/mint-attester/dev-only-quorum.key` is a fixed quorum key for local development only. It is public, so a `Verifier` that trusts it accepts receipts anyone can sign; never deploy it outside a local chain. The file is a QOS master seed, `sha256("lygos.dev.mint-attester")` in hex, and QOS derives the receipt signing key from it with HKDF-SHA512. The values below are what the attester signs with, pinned by `crates/mint-attester/tests/dev_quorum_key.rs`:
+
+| | |
+|---|---|
+| Signing scalar (`ENCLAVE_P256_KEY` in lygos-contracts `Deploy.s.sol`) | `0x1c61464af96b6a97655f9a0c51bf5c59ef12a98f56c216e14360875ebb70aa2e` |
+| Public key x (`ENCLAVE_X`, the `Verifier`'s `signerX`) | `0xeab1fb2e525b4744a49e099469697402f422646db4747e0cb2340d35c3b0b9c1` |
+| Public key y (`ENCLAVE_Y`, the `Verifier`'s `signerY`) | `0x4b839e4f3117435cdc62dd8e63c147130f8adef488482af54746e591b4c35941` |
+
+From the repository root, with `MIDNIGHT_ORACLE_KEYS` as orange-grove sets it and `LYGOS_AUTHORIZER` the EVM address of the dev Midnight authorizer, whose key signs each request's `authorization`:
+
+```sh
+cargo run --locked -p mint-attester -- \
+  --quorum-file dev/mint-attester/dev-only-quorum.key \
+  --host 0.0.0.0 --port 3000 \
+  --network regtest --allow-insecure-network --min-confirmations 1 \
+  --midnight-oracle-keys "$MIDNIGHT_ORACLE_KEYS" \
+  --lygos-authorizer "$LYGOS_AUTHORIZER"
+```
+
+Confirmations count headers after the funding block's, so with `--min-confirmations 1` the lock proof must carry the funding block's header and at least one after it: mine one block past the funding block before attesting. That is two confirmations as Bitcoin Core counts them; lygos-contracts' `MIN_CONFIRMATIONS` (default 1) counts the same way as the attester.
+
+It builds with `cargo build --locked -p mint-attester` in a stock `rust:1.x-bookworm` image: rustup installs the toolchain `rust-toolchain.toml` pins (1.94), and the native dependencies (`ring`, `secp256k1-sys`, `secp256k1-zkp-sys`) build with the C compiler the image ships. No other system packages are needed.
 
 ## Payout script overrides
 
