@@ -1,7 +1,7 @@
 //! Recover the signer of a Midnight authorization with the enclave's own code.
 //!
-//! `cargo run -q -p mint-attester --example authorizer_check -- <chain id> <originator> <terms hash>
-//! <signature>` prints the signer's address. `scripts/fordefi-authorizer.sh check` uses it to
+//! `cargo run -q -p mint-attester --example authorizer_check -- <chain id> <originator> <offer hash>
+//! <accept hash> <signature>` prints the signer's address. `scripts/fordefi-authorizer.sh check` uses it to
 //! confirm a Fordefi vault's signature is one the enclave accepts.
 
 use mint_attester::authorizer::{digest, signer};
@@ -15,9 +15,11 @@ fn decode<const N: usize>(field: &str, value: &str) -> Result<[u8; N], String> {
 }
 
 fn run(args: &[String]) -> Result<[u8; 20], String> {
-    let [chain_id, originator, terms_hash, signature] = args else {
+    let [chain_id, originator, offer_hash, accept_hash, signature] = args else {
         return Err(
-            "usage: authorizer_check <chain id> <originator> <terms hash> <signature>".to_owned(),
+            "usage: authorizer_check <chain id> <originator> <offer hash> <accept hash> \
+                    <signature>"
+                .to_owned(),
         );
     };
     let chain_id = chain_id
@@ -26,7 +28,8 @@ fn run(args: &[String]) -> Result<[u8; 20], String> {
     let approval = digest(
         chain_id,
         &decode("originator", originator)?,
-        &decode("terms hash", terms_hash)?,
+        &decode("offer hash", offer_hash)?,
+        &decode("accept hash", accept_hash)?,
     );
     signer(&approval, &decode("signature", signature)?)
 }

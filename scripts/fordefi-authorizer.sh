@@ -6,8 +6,8 @@
 #   scripts/fordefi-authorizer.sh verify <transaction id> <chain id> <originator>
 #
 # create makes an EVM vault and prints its id and address; the address is the deploy config's
-# --lygos-authorizer. check has the vault sign MidnightAuthorization over an all-zero termsHash,
-# which names no DLC, and recovers the signer with the enclave's code. verify re-reads a check
+# --lygos-authorizer. check has the vault sign MidnightAuthorization over an all-zero offerHash
+# and acceptHash, which name no DLC, and recovers the signer with the enclave's code. verify re-reads a check
 # that was left waiting for approval.
 #
 # Auth: FORDEFI_API_TOKEN, an API user in the Lygos org that owns the vault (never a lender's org).
@@ -49,7 +49,7 @@ recover() {
   signature=$(jq -r '.signatures[0].data' <<<"${tx}" | openssl base64 -d -A | od -An -tx1 -v | tr -d ' \n')
   vault_address=$(get "/api/v1/vaults/${vault_id}" | jq -r '.address' | tr '[:upper:]' '[:lower:]')
   signer=$(cargo run -q -p mint-attester --example authorizer_check -- \
-    "${chain_id}" "${originator}" "${zero_hash}" "${signature}")
+    "${chain_id}" "${originator}" "${zero_hash}" "${zero_hash}" "${signature}")
   echo "signature ${signature} (v byte 0x${signature: -2})"
   echo "vault  ${vault_address}"
   echo "signer ${signer}"
@@ -71,7 +71,7 @@ case ${1:-} in
   check)
     vault_id=${2:?vault id} chain_id=${3:?chain id} originator=${4:?originator}
     typed=$(jq -cn --argjson chainId "${chain_id}" --arg originator "${originator}" \
-      --arg termsHash "${zero_hash}" '{
+      --arg zero "${zero_hash}" '{
         types: {
           EIP712Domain: [
             {name: "name", type: "string"},
@@ -79,16 +79,19 @@ case ${1:-} in
             {name: "chainId", type: "uint256"},
             {name: "verifyingContract", type: "address"}
           ],
-          MidnightAuthorization: [{name: "termsHash", type: "bytes32"}]
+          MidnightAuthorization: [
+            {name: "offerHash", type: "bytes32"},
+            {name: "acceptHash", type: "bytes32"}
+          ]
         },
         primaryType: "MidnightAuthorization",
         domain: {name: "Lygos Midnight Authorizer", version: "1", chainId: $chainId,
           verifyingContract: $originator},
-        message: {termsHash: $termsHash}
+        message: {offerHash: $zero, acceptHash: $zero}
       }')
     body=$(jq -cn --arg vault "${vault_id}" --argjson chain "${chain_id}" --arg raw "${typed}" '{
       vault_id: $vault, type: "evm_message", signer_type: "api_signer", sign_mode: "auto",
-      note: "Midnight authorizer check: all-zero termsHash, names no DLC",
+      note: "Midnight authorizer check: all-zero offer and accept hashes, names no DLC",
       details: {type: "typed_message_type", chain: $chain, raw_data: $raw},
       wait_for_state: "signed", timeout: 50
     }')
