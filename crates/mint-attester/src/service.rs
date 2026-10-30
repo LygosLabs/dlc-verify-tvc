@@ -434,7 +434,7 @@ static ATTEST_SLOTS: Semaphore = Semaphore::const_new(8);
 /// DDK's refund-to-accepter contract flag.
 const REFUND_TO_ACCEPTER_FLAG: u8 = 0x01;
 /// A Midnight outcome list is `not-minted`, `released`, and one entry per liquidator.
-const MAX_OUTCOMES: usize = 64;
+const MAX_OUTCOMES: usize = 2 + midnight::MAX_LIQUIDATORS;
 /// How long a request may take to deliver its body once it holds a slot.
 const BODY_READ_LIMIT: Duration = Duration::from_secs(5);
 
@@ -882,10 +882,9 @@ mod tests {
         );
     }
 
-    /// `attest` end to end up to the policy: the real mainnet lock proof in explorer byte order
-    /// passes SPV, and the real testnet transcript is then refused for being on another network.
-    #[test]
-    fn attest_reaches_the_policy_with_an_explorer_order_proof() {
+    /// The real testnet transcript with the real mainnet lock proof in explorer byte order, and
+    /// a config pinning the transcript's oracle.
+    fn fixture_request() -> (Config, AttestRequest) {
         use crate::spv::fixture::{BRANCH, HEADERS, TX, TX_INDEX};
         let fixture: Value = serde_json::from_str(include_str!(
             "../../verifier-core/tests/fixtures/testnet-loan-118c9fc9.json"
@@ -912,6 +911,14 @@ mod tests {
             verifier: hex0x(&[0x11; 20]),
             authorization: hex0x(&[0; 65]),
         };
+        (config, request)
+    }
+
+    /// `attest` end to end up to the policy: the real mainnet lock proof in explorer byte order
+    /// passes SPV, and the real testnet transcript is then refused for being on another network.
+    #[test]
+    fn attest_reaches_the_policy_with_an_explorer_order_proof() {
+        let (config, request) = fixture_request();
         let error = attest(&config, &request).expect_err("a testnet DLC is refused on mainnet");
         assert!(error.contains("another Bitcoin network"), "{error}");
 
@@ -932,6 +939,47 @@ mod tests {
         unauthorized.authorization = String::new();
         let error = attest(&config, &unauthorized).expect_err("no authorization");
         assert!(error.contains("no Midnight authorization"), "{error}");
+    }
+
+    /// An offer naming every liquidator the Originator can register gets past the outcome cap;
+    /// one outcome more is refused before any signature work.
+    #[test]
+    fn a_full_liquidator_set_fits_under_the_outcome_cap() {
+        use ddk_messages::{
+            OfferDlc,
+            contract_msgs::ContractInfo,
+            oracle_msgs::{EventDescriptor, OracleInfo},
+        };
+        use lightning::util::ser::{Readable, Writeable};
+        let (config, request) = fixture_request();
+        let with_outcomes = |count: usize| {
+            let bytes = hex::decode(&request.offer).expect("hex");
+            let mut offer: OfferDlc =
+                Readable::read(&mut std::io::Cursor::new(bytes)).expect("offer");
+            if let ContractInfo::SingleContractInfo(single) = &mut offer.contract_info
+                && let OracleInfo::Single(oracle) = &mut single.contract_info.oracle_info
+                && let EventDescriptor::EnumEvent(descriptor) =
+                    &mut oracle.oracle_announcement.oracle_event.event_descriptor
+            {
+                descriptor.outcomes = ["not-minted".to_owned(), "released".to_owned()]
+                    .into_iter()
+                    .chain((1..count - 1).map(|i| format!("liquidated-by-0x{i:040x}")))
+                    .collect();
+            }
+            let offer = hex::encode(offer.encode());
+            let parsed = offer_announcement(&offer).expect("announcement");
+            assert_eq!(parsed.outcomes.len(), count);
+            AttestRequest {
+                offer,
+                ..fixture_request().1
+            }
+        };
+        let full = 2 + midnight::MAX_LIQUIDATORS;
+        // The edited offer no longer rebuilds, so it is refused, but past the cap.
+        let error = attest(&config, &with_outcomes(full)).expect_err("refused later");
+        assert!(!error.starts_with("more than"), "{error}");
+        let error = attest(&config, &with_outcomes(full + 1)).expect_err("one too many");
+        assert_eq!(error, format!("more than {full} outcomes"));
     }
 
     #[tokio::test]

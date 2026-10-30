@@ -6,6 +6,9 @@ use sha2::{Digest, Sha256};
 /// The refund locktime must sit at least this long after the market's maturity.
 pub const REFUND_GAP_SECS: u64 = 14 * 24 * 60 * 60;
 
+/// lygos-contracts' `OriginatorExt.MAX_LIQUIDATORS`: the most liquidators an outcome list names.
+pub const MAX_LIQUIDATORS: usize = 100;
+
 /// `SSTORE2_PREFIX` in Midnight's `IdLib`.
 const SSTORE2_PREFIX: [u8; 11] = [
     0x60, 0x0b, 0x38, 0x03, 0x80, 0x60, 0x0b, 0x5f, 0x39, 0x5f, 0xf3,
