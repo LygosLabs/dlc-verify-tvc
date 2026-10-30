@@ -869,7 +869,9 @@ mod tests {
             lygos_funding_pubkey: None,
             ..config()
         };
-        let error = check_lygos_key(&unpinned, LYGOS).expect_err("mainnet must pin");
+        let terms = authorized();
+        let error = receipt_for(&unpinned, &dlc(), &announcement(&terms), &lock(), &terms)
+            .expect_err("mainnet must pin");
         assert!(error.contains("--lygos-funding-pubkey"), "{error}");
         let staging = Config {
             network: Network::Signet,
