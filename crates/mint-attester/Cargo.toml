@@ -30,4 +30,6 @@ verifier-schema = { path = "../verifier-schema" }
 workspace = true
 
 [dev-dependencies]
+ddk-messages = { workspace = true }
+lightning = { workspace = true }
 tower = { workspace = true, features = ["util"] }
