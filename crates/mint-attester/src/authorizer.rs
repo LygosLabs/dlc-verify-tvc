@@ -1,7 +1,11 @@
-//! The Midnight authorization: the Lygos authorizer's EIP-712 signature over a DLC's `termsHash`.
+//! The Midnight authorization: the Lygos authorizer's EIP-712 signature over a DLC's offer and
+//! accept.
 //!
 //! Lygos funds every DLC from a fresh key, so the enclave pins who may approve a Midnight DLC
-//! rather than which key funds it. See WP §5.
+//! rather than which key funds it. See WP §5. The offer and accept fix everything `termsHash`
+//! names (the funding outpoint, both funding keys, the announcement, every CET and the refund),
+//! and unlike `termsHash` they exist before any verification, so the enclave checks the approval
+//! first and spends nothing on a request Lygos did not approve.
 
 use crate::{
     keccak,
@@ -11,13 +15,26 @@ use secp256k1::{
     Message, Secp256k1,
     ecdsa::{RecoverableSignature, RecoveryId},
 };
+use sha2::{Digest, Sha256};
 
-const AUTHORIZATION_TYPE: &[u8] = b"MidnightAuthorization(bytes32 termsHash)";
+const AUTHORIZATION_TYPE: &[u8] = b"MidnightAuthorization(bytes32 offerHash,bytes32 acceptHash)";
 
-/// The EIP-712 digest the authorizer signs: `MidnightAuthorization(termsHash)` under the domain
-/// `("Lygos Midnight Authorizer", "1", chainId, originator)`.
+/// A message's hash in the authorization: SHA-256 of its raw bytes, not of its hex.
 #[must_use]
-pub fn digest(chain_id: u64, originator: &[u8; 20], terms_hash: &[u8; 32]) -> [u8; 32] {
+pub fn message_hash(message: &[u8]) -> [u8; 32] {
+    Sha256::digest(message).into()
+}
+
+/// The EIP-712 digest the authorizer signs: `MidnightAuthorization(offerHash, acceptHash)` under
+/// the domain `("Lygos Midnight Authorizer", "1", chainId, originator)`, each hash a
+/// [`message_hash`].
+#[must_use]
+pub fn digest(
+    chain_id: u64,
+    originator: &[u8; 20],
+    offer_hash: &[u8; 32],
+    accept_hash: &[u8; 32],
+) -> [u8; 32] {
     let domain_separator = keccak(&[
         &keccak(&[DOMAIN_TYPE]),
         &keccak(&[b"Lygos Midnight Authorizer"]),
@@ -25,7 +42,7 @@ pub fn digest(chain_id: u64, originator: &[u8; 20], terms_hash: &[u8; 32]) -> [u
         &word(&chain_id.to_be_bytes()),
         &word(originator),
     ]);
-    let struct_hash = keccak(&[&keccak(&[AUTHORIZATION_TYPE]), terms_hash]);
+    let struct_hash = keccak(&[&keccak(&[AUTHORIZATION_TYPE]), offer_hash, accept_hash]);
     keccak(&[b"\x19\x01", &domain_separator, &struct_hash])
 }
 
@@ -74,16 +91,16 @@ mod tests {
     /// Anvil's first account.
     pub const AUTHORIZER: &str = "f39fd6e51aad88f6f4ce6ab8827279cfffb92266";
 
-    /// `cast wallet sign --data` of `MidnightAuthorization(0xabab…)` on chain 8453 with
+    /// `cast wallet sign --data` of `MidnightAuthorization(0xabab…, 0xcdcd…)` on chain 8453 with
     /// `verifyingContract` 0x5656…, by Anvil's first key. Pins the digest and the recovery
     /// against an independent EIP-712 implementation.
     #[test]
     fn recovers_a_cast_signature() {
-        let signature: [u8; 65] = hex::decode("6c34a16c4e3e2d0580510111fa308be34d74a5e2e144df10631ad0a5afe660fd1041348157be3e2786502b456008e70674b639796c78b083b45a6ec11b55b3921c")
+        let signature: [u8; 65] = hex::decode("40281d8e49e0f75a7b4bc12b14e9c11bbb81bc7ab98dceaa65a11c66b09097fd18d450555df544a7b5087496904be632f3a2338268f508f53f5609a5cb4e11a81b")
             .expect("hex")
             .try_into()
             .expect("65 bytes");
-        let digest = digest(8453, &[0x56; 20], &[0xab; 32]);
+        let digest = digest(8453, &[0x56; 20], &[0xab; 32], &[0xcd; 32]);
         assert_eq!(
             hex::encode(signer(&digest, &signature).expect("signer")),
             AUTHORIZER
@@ -96,19 +113,34 @@ mod tests {
             AUTHORIZER
         );
 
-        let other = super::digest(8453, &[0x57; 20], &[0xab; 32]);
-        assert_ne!(
-            hex::encode(signer(&other, &signature).expect("signer")),
-            AUTHORIZER
-        );
+        // Another originator, or the two hashes swapped, is another approval.
+        for other in [
+            super::digest(8453, &[0x57; 20], &[0xab; 32], &[0xcd; 32]),
+            super::digest(8453, &[0x56; 20], &[0xcd; 32], &[0xab; 32]),
+        ] {
+            assert_ne!(
+                hex::encode(signer(&other, &signature).expect("signer")),
+                AUTHORIZER
+            );
+        }
         let mut bad_v = signature;
         bad_v[64] = 29;
         assert!(signer(&digest, &bad_v).is_err());
     }
 
+    /// The hash is over the raw bytes: the hex spelling of a message is not what is approved.
+    #[test]
+    fn a_message_hash_is_sha256_of_its_bytes() {
+        assert_eq!(
+            hex::encode(message_hash(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_ne!(message_hash(&[0xab]), message_hash(b"ab"));
+    }
+
     #[test]
     fn sign_round_trips() {
-        let digest = digest(1, &[1; 20], &[2; 32]);
+        let digest = digest(1, &[1; 20], &[2; 32], &[3; 32]);
         let a = signer(&digest, &sign(&digest, &[5; 32])).expect("signer");
         let b = signer(&digest, &sign(&digest, &[6; 32])).expect("signer");
         assert_ne!(a, b);

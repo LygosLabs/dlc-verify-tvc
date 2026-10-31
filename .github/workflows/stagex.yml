@@ -65,8 +65,8 @@ jobs:
           set -euo pipefail
           key_file="${RUNNER_TEMP}/qos.quorum.key"
           openssl rand -hex 32 > "${key_file}"
-          # Throwaway keys: a dummy authorizer address and the secp256k1 generator's x coordinate,
-          # pinned for one quarter.
+          # Throwaway keys: Anvil's first account as the authorizer, and the secp256k1 generator's x
+          # coordinate as the oracle, pinned for one quarter.
           docker run --rm -d \
             --name mint-attester-smoke \
             --entrypoint /tvc_app \
@@ -74,7 +74,7 @@ jobs:
             -v "${key_file}:/qos.quorum.key:ro" \
             "lygoslabs-dlc-verify-tvc/${{ matrix.target.name }}:latest" \
             --network regtest --allow-insecure-network \
-            --lygos-authorizer 0x1111111111111111111111111111111111111111 \
+            --lygos-authorizer 0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266 \
             --midnight-oracle-keys midnight-2026Q4-smoke-v1:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
           trap 'docker rm -f mint-attester-smoke >/dev/null 2>&1 || true' EXIT
           for attempt in $(seq 1 30); do
@@ -87,7 +87,9 @@ jobs:
             fi
             sleep 1
           done
-          # A well-formed request with no lock proof must reach the SPV check and be refused there.
+          # A well-formed, approved request with no lock proof must reach the SPV check and be
+          # refused there. The authorization is Anvil's first key's signature of this offer and
+          # accept on chain 1, originator 0: `cast wallet sign --data`.
           genesis_coinbase=01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000
           jq --arg tx "${genesis_coinbase}" '{offer, accept, sign, tx: $tx, txIndex: 0, merkleBranch: [], headers: [], market: "", chainId: 1,
                originator: "0x0000000000000000000000000000000000000000",
@@ -95,7 +97,7 @@ jobs:
                mintDeadline: 0, announcedAt: 0,
                requestId: "00000000-0000-0000-0000-000000000000",
                verifier: "0x0000000000000000000000000000000000000000",
-               authorization: ("0x" + ("00" * 65))}' \
+               authorization: "0x9e04f46b45a7cb2e7dffbdbe771a2cb8228f2bcd58f9c51497a279929ec3910320334089e6a91c6cbc9b79b08ebb5bf47508232efeb5eae9c7c0c09a2c58f4e51c"}' \
             crates/verifier-core/tests/fixtures/testnet-loan-118c9fc9.json > "${RUNNER_TEMP}/attest-request.json"
           status=$(curl --silent --output "${RUNNER_TEMP}/attest-response.json" --write-out '%{http_code}' \
             -H 'content-type: application/json' \
