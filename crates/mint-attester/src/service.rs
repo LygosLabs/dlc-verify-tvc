@@ -2,7 +2,7 @@
 
 use crate::{
     authorizer,
-    midnight::{self, REFUND_GAP_SECS, Terms},
+    midnight::{self, OracleKeys, REFUND_GAP_SECS, RequestId, Terms},
     receipt::{Domain, Receipt, sign_digest},
     spv::{Lock, LockProof, verify_lock},
 };
@@ -15,10 +15,7 @@ use axum::{
     routing::{get, post},
 };
 use bitcoin::absolute::LOCK_TIME_THRESHOLD;
-use bitcoin::{
-    Network, ScriptBuf, Txid, consensus::encode::deserialize_hex, hashes::Hash,
-    secp256k1::XOnlyPublicKey,
-};
+use bitcoin::{Network, ScriptBuf, Txid, consensus::encode::deserialize_hex, hashes::Hash};
 use p256::ecdsa::SigningKey;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -35,9 +32,9 @@ pub struct Config {
     pub network: Network,
     /// The Midnight authorizer's EVM address: every DLC's `termsHash` must carry its signature.
     pub lygos_authorizer: [u8; 20],
-    /// The Midnight oracle's key. Typed so an empty pin, which verifier-core reads as "no
-    /// expected oracle", cannot be constructed.
-    pub oracle_pubkey: XOnlyPublicKey,
+    /// The Midnight oracle's keys, one per calendar quarter. An announcement must be signed by
+    /// the key of its market's maturity quarter.
+    pub oracle_keys: OracleKeys,
     /// The quorum signing key the `Verifier` contract trusts.
     pub key: SigningKey,
     /// Sign receipts for a network whose proof of work is free to forge. Test deployments only.
@@ -78,6 +75,8 @@ pub struct AttestRequest {
     pub mint_deadline: u64,
     /// Timestamp of the block the oracle froze the liquidator set at.
     pub announced_at: u64,
+    /// orange-grove's request id for the announcement, a lowercase hyphenated UUID.
+    pub request_id: String,
     /// `Verifier` address the receipt is signed for.
     pub verifier: String,
     /// The Midnight authorizer's EIP-712 signature over this DLC's `termsHash`, `r ‖ s ‖ v`.
@@ -103,6 +102,8 @@ pub struct LoanTerms {
     pub announced_at: u64,
     /// The Midnight authorizer's signature over `termsHash`.
     pub authorization: [u8; 65],
+    /// orange-grove's request id for the announcement.
+    pub request_id: RequestId,
 }
 
 /// Check a request end to end and return the signed receipt as JSON.
@@ -122,6 +123,7 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
         mint_deadline: request.mint_deadline,
         announced_at: request.announced_at,
         authorization: fixed("authorization", &request.authorization)?,
+        request_id: request.request_id.parse()?,
     };
     let verifier = fixed("verifier", &request.verifier)?;
 
@@ -131,20 +133,28 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
     if announcement.outcomes.len() > MAX_OUTCOMES {
         return Err(format!("more than {MAX_OUTCOMES} outcomes"));
     }
+    // The announcement's signature is checked under its own key here; which key may sign it
+    // depends on the market, so `receipt_for` pins the key.
     let dlc = verify_dlc_compatibility(
         &request.offer,
         &request.accept,
         Some(&request.sign),
-        Some(&config.oracle_pubkey.to_string()),
+        None,
         Some(network_name(config.network)),
     );
 
     let proof = LockProof {
         tx: deserialize_hex(&request.tx).map_err(|error| format!("invalid tx: {error}"))?,
+        // No funding output means the transcript did not rebuild; say why.
         vout: dlc
             .fund_output_index
             .and_then(|index| u32::try_from(index).ok())
-            .ok_or("the DLC has no funding output")?,
+            .ok_or_else(|| {
+                format!(
+                    "the DLC does not rebuild: {}",
+                    dlc.error.as_deref().unwrap_or("no funding output")
+                )
+            })?,
         tx_index: request.tx_index,
         merkle_branch: request
             .merkle_branch
@@ -245,6 +255,9 @@ pub fn receipt_for(
     if market.chain_id != terms.chain_id {
         return Err("the market is on another chain".to_owned());
     }
+    config
+        .oracle_keys
+        .check_signer(market.maturity, dlc.extracted_oracle_pubkey.as_deref())?;
     let refund_locktime = u64::from(
         dlc.refund_locktime
             .ok_or("the DLC has no refund locktime")?,
@@ -258,7 +271,7 @@ pub fn receipt_for(
         terms.chain_id,
         &terms.originator,
         &market.id,
-        borrower,
+        &terms.request_id,
         &liquidators,
         &terms.controller,
         terms.mint_deadline,
@@ -498,7 +511,10 @@ mod tests {
     // The generator and twice the generator: real points, so the typed config parses them.
     const LYGOS: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     const BORROWER: &str = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+    /// The 2026Q4 oracle key, the quarter `MATURITY` falls in, and the next quarter's.
     const ORACLE: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const NEXT_ORACLE: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+    const REQUEST_ID: &str = "0f8b7c2e-4d1a-4e6b-9c3f-2a5d8e7b1c40";
     /// Stand-in funding witness script; the lock's output is its P2WSH.
     const WITNESS_SCRIPT: [u8; 1] = [0x51];
     const LIQUIDATOR: &str = "liquidated-by-0x00000000000000000000000000000000000000aa";
@@ -519,7 +535,11 @@ mod tests {
         Config {
             network: Network::Bitcoin,
             lygos_authorizer: authorizer_address(),
-            oracle_pubkey: ORACLE.parse().expect("key"),
+            oracle_keys: format!(
+                "midnight-2026Q4-test-v1:{ORACLE},midnight-2027Q1-test-v1:{NEXT_ORACLE}"
+            )
+            .parse()
+            .expect("keys"),
             key: SigningKey::from_slice(&[7; 32]).expect("key"),
             allow_insecure_network: false,
             min_confirmations: 1,
@@ -535,6 +555,7 @@ mod tests {
             mint_deadline: 1_790_000_000,
             announced_at: 1_789_000_000,
             authorization: [0; 65],
+            request_id: REQUEST_ID.parse().expect("request id"),
         }
     }
 
@@ -546,7 +567,7 @@ mod tests {
             terms.chain_id,
             &terms.originator,
             &market.id,
-            BORROWER,
+            &terms.request_id,
             &[&LIQUIDATOR["liquidated-by-".len()..]],
             &terms.controller,
             terms.mint_deadline,
@@ -596,7 +617,7 @@ mod tests {
             terms.chain_id,
             &terms.originator,
             &market.id,
-            BORROWER,
+            &terms.request_id,
             &[&LIQUIDATOR["liquidated-by-".len()..]],
             &terms.controller,
             terms.mint_deadline,
@@ -622,6 +643,7 @@ mod tests {
         };
         DlcVerifyResult {
             verification_status: VerificationStatus::Pass,
+            extracted_oracle_pubkey: Some(ORACLE.to_owned()),
             offerer_funding_pubkey: Some(BORROWER.to_owned()),
             accepter_funding_pubkey: Some(LYGOS.to_owned()),
             refund_locktime: Some(MATURITY + 14 * 24 * 60 * 60),
@@ -761,7 +783,7 @@ mod tests {
                 d.accepter_funding_pubkey = Some(BORROWER.to_owned());
                 d.offerer_funding_pubkey = Some(LYGOS.to_owned());
             })
-            .contains("event id")
+            .contains("did not sign")
         );
         assert!(
             refused(|d, _, _| d.refund_tx_id = Some(Txid::from_byte_array([8; 32]).to_string()))
@@ -791,6 +813,14 @@ mod tests {
         assert!(refused(|_, t, _| t.controller = [0xbd; 20]).contains("event id"));
         assert!(refused(|_, t, _| t.originator = [0xbd; 20]).contains("event id"));
         assert!(refused(|_, t, _| t.mint_deadline += 1).contains("event id"));
+        assert!(
+            refused(
+                |_, t, _| t.request_id = "0f8b7c2e-4d1a-4e6b-9c3f-2a5d8e7b1c41"
+                    .parse()
+                    .expect("request id")
+            )
+            .contains("event id")
+        );
         assert!(refused(|_, t, _| t.mint_deadline = 0).contains("released"));
         assert!(
             refused(|_, _, l| l.txid = Txid::from_byte_array([8; 32]))
@@ -827,6 +857,35 @@ mod tests {
         let error = receipt_for(&config(), &dlc(), &announcement, &lock(), &terms)
             .expect_err("announcedAt is under the oracle's signature");
         assert!(error.contains("event id"), "{error}");
+    }
+
+    /// The quarter's key, and only it, may sign: not another quarter's pinned key, and nothing
+    /// for a quarter whose key ceremony has not happened.
+    #[test]
+    fn only_the_maturity_quarters_oracle_key_may_sign() {
+        let terms = authorized();
+        let attempt = |config: &Config, dlc: &DlcVerifyResult| {
+            receipt_for(config, dlc, &announcement(&terms), &lock(), &terms)
+        };
+        assert!(attempt(&config(), &dlc()).is_ok());
+        let mut next_quarters = dlc();
+        next_quarters.extracted_oracle_pubkey = Some(NEXT_ORACLE.to_owned());
+        let error = attempt(&config(), &next_quarters).expect_err("2027Q1 key on a 2026Q4 market");
+        assert!(
+            error.contains("not signed by the 2026Q4 oracle key"),
+            "{error}"
+        );
+        let unpinned = Config {
+            oracle_keys: format!("midnight-2027Q1-test-v1:{ORACLE}")
+                .parse()
+                .expect("keys"),
+            ..config()
+        };
+        let error = attempt(&unpinned, &dlc()).expect_err("no 2026Q4 key");
+        assert!(
+            error.contains("no oracle key is pinned for 2026Q4"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -891,8 +950,7 @@ mod tests {
         ))
         .expect("fixture");
         let field = |name: &str| fixture[name].as_str().expect("field").to_owned();
-        let mut config = config();
-        config.oracle_pubkey = field("oraclePubkey").parse().expect("oracle key");
+        let config = config();
         let hex0x = |bytes: &[u8]| format!("0x{}", hex::encode(bytes));
         let request = AttestRequest {
             offer: field("offer"),
@@ -908,6 +966,7 @@ mod tests {
             controller: hex0x(&[0xc0; 20]),
             mint_deadline: 1_790_000_000,
             announced_at: 1_789_000_000,
+            request_id: REQUEST_ID.to_owned(),
             verifier: hex0x(&[0x11; 20]),
             authorization: hex0x(&[0; 65]),
         };
@@ -935,7 +994,13 @@ mod tests {
         let error = attest(&config, &unreversed).expect_err("internal byte order is wrong");
         assert!(error.contains("lock proof refused: NotInBlock"), "{error}");
 
-        let mut unauthorized = unreversed;
+        let mut uppercase = unreversed;
+        uppercase.request_id = REQUEST_ID.to_uppercase();
+        let error = attest(&config, &uppercase).expect_err("not the canonical spelling");
+        assert!(error.contains("invalid requestId"), "{error}");
+
+        let mut unauthorized = uppercase;
+        unauthorized.request_id = REQUEST_ID.to_owned();
         unauthorized.authorization = String::new();
         let error = attest(&config, &unauthorized).expect_err("no authorization");
         assert!(error.contains("no Midnight authorization"), "{error}");
