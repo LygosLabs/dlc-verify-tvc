@@ -37,7 +37,8 @@ pub struct Config {
     pub lygos_authorizer: [u8; 20],
     /// The Lygos Midnight funding key: every DLC's accepter must be this key. A Fordefi lender
     /// co-signs every DLC from one vault key, so production pins it. Staging co-signs with dlcd-rs,
-    /// which derives a key per contract, so it runs without a pin. Mainnet refuses to run without one.
+    /// which derives a key per contract, so it runs without a pin. The binary will not start on
+    /// mainnet without one.
     pub lygos_funding_pubkey: Option<PublicKey>,
     /// The Midnight oracle's keys, one per calendar quarter. An announcement must be signed by
     /// the key of its market's maturity quarter.
@@ -401,17 +402,19 @@ pub fn receipt_for(
     })
 }
 
-/// Where a Lygos funding key is pinned, the accepter's key must be it. Mainnet must pin one.
+/// Where a Lygos funding key is pinned, the accepter's key must be it. Mainnet always pins one:
+/// `--lygos-funding-pubkey` is required with `--network mainnet`.
 fn check_lygos_key(config: &Config, lygos: &str) -> Result<(), String> {
-    match &config.lygos_funding_pubkey {
-        Some(pinned) if !lygos.eq_ignore_ascii_case(&pinned.to_string()) => {
-            Err("the DLC's Lygos funding key is not the pinned Midnight key".to_owned())
-        }
-        None if config.network == Network::Bitcoin => {
-            Err("mainnet needs a pinned Lygos funding key (--lygos-funding-pubkey)".to_owned())
-        }
-        _ => Ok(()),
+    let Some(pinned) = config.lygos_funding_pubkey else {
+        return Ok(());
+    };
+    let lygos: PublicKey = lygos
+        .parse()
+        .map_err(|_| "the DLC's Lygos funding key is not a public key".to_owned())?;
+    if lygos != pinned {
+        return Err("the DLC's Lygos funding key is not the pinned Midnight key".to_owned());
     }
+    Ok(())
 }
 
 /// Parse the `--network` launch argument.
@@ -924,21 +927,14 @@ mod tests {
     }
 
     #[test]
-    fn mainnet_needs_a_pinned_lygos_key_and_staging_may_run_without() {
-        let unpinned = Config {
+    fn staging_runs_without_a_pinned_lygos_key() {
+        let staging = Config {
+            network: Network::Signet,
             lygos_funding_pubkey: None,
             ..config()
         };
-        let terms = authorized();
-        let error = receipt_for(&unpinned, &dlc(), &announcement(&terms), &lock(), &terms)
-            .expect_err("mainnet must pin");
-        assert!(error.contains("--lygos-funding-pubkey"), "{error}");
-        let staging = Config {
-            network: Network::Signet,
-            ..unpinned
-        };
         assert_eq!(check_lygos_key(&staging, LYGOS), Ok(()));
-        assert_eq!(check_lygos_key(&config(), &LYGOS.to_uppercase()), Ok(()));
+        assert_eq!(check_lygos_key(&staging, BORROWER), Ok(()));
     }
 
     #[test]
