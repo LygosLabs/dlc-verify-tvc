@@ -296,10 +296,12 @@ fn validate_contract_maturity(offer: &OfferDlc, event_maturity_epoch: u32) -> Re
     // The maturity is a Unix time, so the locktimes compared with it must be Unix
     // times too. A block-height CET locktime is numerically below every
     // timestamp and would otherwise pass as "before maturity" while locking
-    // every CET for years.
-    if offer.cet_locktime < bitcoin::absolute::LOCK_TIME_THRESHOLD
-        || offer.refund_locktime < bitcoin::absolute::LOCK_TIME_THRESHOLD
-    {
+    // every CET for years. A CET locktime of 0 is no lock at all: the CET is
+    // spendable as soon as the lock exists, which the mint attester's receipt
+    // policy admits (a Midnight contract's CETs carry it).
+    let cet_is_a_height =
+        offer.cet_locktime != 0 && offer.cet_locktime < bitcoin::absolute::LOCK_TIME_THRESHOLD;
+    if cet_is_a_height || offer.refund_locktime < bitcoin::absolute::LOCK_TIME_THRESHOLD {
         return Err(format!(
             "CET locktime {} and refund locktime {} must be Unix times to compare with oracle event maturity {event_maturity_epoch}",
             offer.cet_locktime, offer.refund_locktime
@@ -1216,6 +1218,14 @@ mod tests {
 
         offer.cet_locktime = 1_700_000_010;
         offer.refund_locktime = 1_000_100;
+        assert!(validate_contract_maturity(&offer, maturity).is_err());
+
+        // No CET locktime at all is not a height: the CETs spend at once.
+        offer.cet_locktime = 0;
+        offer.refund_locktime = 1_700_000_030;
+        assert!(validate_contract_maturity(&offer, maturity).is_ok());
+        // A height of 1 still is one.
+        offer.cet_locktime = 1;
         assert!(validate_contract_maturity(&offer, maturity).is_err());
     }
 

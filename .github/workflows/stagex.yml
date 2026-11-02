@@ -65,7 +65,8 @@ jobs:
           set -euo pipefail
           key_file="${RUNNER_TEMP}/qos.quorum.key"
           openssl rand -hex 32 > "${key_file}"
-          # Throwaway keys: a dummy authorizer address and the secp256k1 generator's x coordinate.
+          # Throwaway keys: a dummy authorizer address and the secp256k1 generator's x coordinate,
+          # pinned for one quarter.
           docker run --rm -d \
             --name mint-attester-smoke \
             --entrypoint /tvc_app \
@@ -74,7 +75,7 @@ jobs:
             "lygoslabs-dlc-verify-tvc/${{ matrix.target.name }}:latest" \
             --network regtest --allow-insecure-network \
             --lygos-authorizer 0x1111111111111111111111111111111111111111 \
-            --oracle-pubkey 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+            --midnight-oracle-keys midnight-2026Q4-smoke-v1:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
           trap 'docker rm -f mint-attester-smoke >/dev/null 2>&1 || true' EXIT
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:3000/health >/dev/null; then
@@ -92,6 +93,7 @@ jobs:
                originator: "0x0000000000000000000000000000000000000000",
                controller: "0x0000000000000000000000000000000000000000",
                mintDeadline: 0, announcedAt: 0,
+               requestId: "00000000-0000-0000-0000-000000000000",
                verifier: "0x0000000000000000000000000000000000000000",
                authorization: ("0x" + ("00" * 65))}' \
             crates/verifier-core/tests/fixtures/testnet-loan-118c9fc9.json > "${RUNNER_TEMP}/attest-request.json"

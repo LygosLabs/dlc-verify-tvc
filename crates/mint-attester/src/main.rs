@@ -1,8 +1,11 @@
 //! Lygos mint attester TVC binary.
 
-use bitcoin::secp256k1::{PublicKey, XOnlyPublicKey};
+use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
-use mint_attester::service::{Config, parse_address, parse_network, router};
+use mint_attester::{
+    midnight::OracleKeys,
+    service::{Config, parse_address, parse_network, router},
+};
 use qos_p256::P256Pair;
 use std::io;
 use tracing_subscriber::EnvFilter;
@@ -30,9 +33,11 @@ struct Cli {
     /// mainnet; staging omits it because dlcd-rs derives a funding key per contract.
     #[arg(long)]
     lygos_funding_pubkey: Option<PublicKey>,
-    /// The Midnight oracle's x-only public key, hex.
+    /// The Midnight oracle's keys, one per calendar quarter, in orange-grove's
+    /// `MIDNIGHT_ORACLE_KEYS` format: comma-separated `keyVersion:xonlyHex`, e.g.
+    /// `midnight-2027Q1-mainnet-v1:<key>`.
     #[arg(long)]
-    oracle_pubkey: XOnlyPublicKey,
+    midnight_oracle_keys: OracleKeys,
     /// Sign receipts on a network other than mainnet, whose proof of work is free to forge.
     #[arg(long, default_value_t = false)]
     allow_insecure_network: bool,
@@ -59,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         network: cli.network,
         lygos_authorizer: cli.lygos_authorizer,
         lygos_funding_pubkey: cli.lygos_funding_pubkey,
-        oracle_pubkey: cli.oracle_pubkey,
+        oracle_keys: cli.midnight_oracle_keys,
         key: quorum_key.signing_key().clone(),
         allow_insecure_network: cli.allow_insecure_network,
         min_confirmations: cli.min_confirmations,

@@ -1,7 +1,9 @@
 //! What makes a DLC a Midnight DLC: the market, the outcome list, the event id, and `termsHash`.
 
 use crate::keccak;
+use bitcoin::secp256k1::XOnlyPublicKey;
 use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, str::FromStr};
 
 /// The refund locktime must sit at least this long after the market's maturity.
 pub const REFUND_GAP_SECS: u64 = 14 * 24 * 60 * 60;
@@ -106,12 +108,42 @@ fn is_address(value: &str) -> bool {
     })
 }
 
+/// orange-grove's request id: the per-loan term the event id commits to, as a lowercase hyphenated
+/// UUID. The borrower's funding key cannot be the per-loan term: ddk generates it when the
+/// borrower builds the offer, after the announcement exists.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequestId(String);
+
+impl RequestId {
+    /// The id as the preimage carries it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for RequestId {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let canonical = value.len() == 36
+            && value.bytes().enumerate().all(|(index, byte)| match index {
+                8 | 13 | 18 | 23 => byte == b'-',
+                _ => matches!(byte, b'0'..=b'9' | b'a'..=b'f'),
+            });
+        if !canonical {
+            return Err("invalid requestId: expected a lowercase hyphenated UUID".to_owned());
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
 /// The Midnight oracle event id as the receipt carries it: the SHA-256 digest alone. The
 /// announcement names the event `"midnight-"`, the maturity label, `"-"`, then this digest in
 /// lowercase hex (see [`event_name`]).
 ///
 /// Terms are canonical strings joined with `//`: decimal integers, lowercase `0x` hex for EVM
-/// values, lowercase hex for the compressed funding key, and liquidators joined with `,`.
+/// values, the request id as its 36-character UUID, and liquidators joined with `,`.
 /// `announced_at` is in the preimage so the oracle's signature covers the receipt's
 /// `announcedAt`; nothing else the enclave checks binds it.
 #[must_use]
@@ -120,7 +152,7 @@ pub fn event_id(
     chain_id: u64,
     originator: &[u8; 20],
     market_id: &[u8; 32],
-    borrower_funding_pubkey: &str,
+    request_id: &RequestId,
     liquidators: &[&str],
     controller: &[u8; 20],
     mint_deadline: u64,
@@ -131,7 +163,7 @@ pub fn event_id(
         &chain_id.to_string(),
         &format!("0x{}", hex::encode(originator)),
         &format!("0x{}", hex::encode(market_id)),
-        borrower_funding_pubkey,
+        request_id.as_str(),
         &liquidators.join(","),
         &format!("0x{}", hex::encode(controller)),
         &mint_deadline.to_string(),
@@ -155,8 +187,28 @@ pub fn event_name(maturity: u64, event_id: &[u8; 32]) -> String {
 
 /// The market maturity as a UTC date in option-expiry style, uppercase, no separators.
 fn maturity_label(maturity: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    ];
+    let (year, month, day) = utc_date(maturity);
+    format!(
+        "{day:02}{}{:02}",
+        MONTHS[usize::from(month - 1)],
+        year.rem_euclid(100)
+    )
+}
+
+/// The calendar quarter a maturity falls in, UTC, as `YYYYQn`: the oracle signs every market
+/// maturing in a quarter with that quarter's key.
+fn quarter(maturity: u64) -> String {
+    let (year, month, _) = utc_date(maturity);
+    format!("{year:04}Q{}", (month - 1) / 3 + 1)
+}
+
+/// A Unix timestamp's UTC `(year, month, day)`, month and day from 1.
+fn utc_date(timestamp: u64) -> (i64, u8, u8) {
     // ponytail: Howard Hinnant's civil-from-days; no chrono for one date format
-    let z = i64::try_from(maturity / 86_400).unwrap_or(i64::MAX / 2) + 719_468;
+    let z = i64::try_from(timestamp / 86_400).unwrap_or(i64::MAX / 2) + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
@@ -165,12 +217,84 @@ fn maturity_label(maturity: u64) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
-    const MONTHS: [&str; 12] = [
-        "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
-    ];
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // 1..=12 by construction
-    let month_name = MONTHS[(month - 1) as usize];
-    format!("{day:02}{month_name}{:02}", year.rem_euclid(100))
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // 1..=12 and 1..=31
+    (year, month as u8, day as u8)
+}
+
+/// The oracle keys a Midnight announcement may be signed with, one per calendar quarter.
+///
+/// Read from the same line as orange-grove's `MIDNIGHT_ORACLE_KEYS`: comma-separated
+/// `keyVersion:xonlyHex` pairs, each split at its last `:`. The enclave also requires each key
+/// version to name its quarter, as the oracle's do (`midnight-2027Q1-<env>-v1`; `:` may follow
+/// the quarter in place of `-`), and refuses a second key for one quarter or an empty list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleKeys(BTreeMap<String, XOnlyPublicKey>);
+
+impl OracleKeys {
+    /// Check `signer`, the key an announcement is signed with, is the key pinned for the quarter
+    /// `maturity` falls in. One key per quarter, so one quarter's key cannot sign for another's
+    /// market.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no key is pinned for that quarter, or `signer` is not its key.
+    pub fn check_signer(&self, maturity: u64, signer: Option<&str>) -> Result<(), String> {
+        let quarter = quarter(maturity);
+        let key = self.0.get(&quarter).ok_or_else(|| {
+            format!("no oracle key is pinned for {quarter}, the market's quarter")
+        })?;
+        if signer != Some(key.to_string().as_str()) {
+            return Err(format!(
+                "the announcement is not signed by the {quarter} oracle key"
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for OracleKeys {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let mut keys = BTreeMap::new();
+        for pair in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|pair| !pair.is_empty())
+        {
+            let (version, key) = pair
+                .rsplit_once(':')
+                .ok_or_else(|| format!("{pair:?}: want keyVersion:xonlyPubkey"))?;
+            let version = version.trim();
+            let quarter = version
+                .strip_prefix("midnight-")
+                .and_then(|rest| rest.split_at_checked(6))
+                .filter(|(quarter, rest)| {
+                    is_quarter(quarter) && (rest.is_empty() || rest.starts_with(['-', ':']))
+                })
+                .map(|(quarter, _)| quarter)
+                .ok_or_else(|| {
+                    format!("{version:?} does not name a quarter: want midnight-YYYYQn-…")
+                })?;
+            let key = XOnlyPublicKey::from_str(key.trim())
+                .map_err(|error| format!("{pair:?}: not an x-only public key: {error}"))?;
+            if keys.insert(quarter.to_owned(), key).is_some() {
+                return Err(format!("{quarter} is pinned twice"));
+            }
+        }
+        if keys.is_empty() {
+            return Err("no oracle key is pinned".to_owned());
+        }
+        Ok(Self(keys))
+    }
+}
+
+fn is_quarter(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 6
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'Q'
+        && (b'1'..=b'4').contains(&bytes[5])
 }
 
 /// Everything `termsHash` commits to.
@@ -225,14 +349,19 @@ mod tests {
     const MARKET_ID: &str = "e7d2aa696b1fa2e75e4afc253f5b8ee8b2ca0b0103328d248f8bd5572a56a353";
 
     /// Pinned against an independent SHA-256 of the documented preimage; a layout change
-    /// must change this digest and the whitepaper together.
+    /// must change this digest and the whitepaper together. The terms are dlcmsg's
+    /// `enclave-layout-on-curve-key` vector with the request id in the funding key's slot.
+    // TODO(cross-check): replace with chainlink-oracle `dlcmsg/testdata/midnight-vectors.json`
+    // once PR #81 (`ben/midnight-orange-grove`) carries request-id vectors.
     #[test]
     fn event_id_is_pinned() {
         let id = event_id(
             8453,
             &[0x56; 20],
             &[0xab; 32],
-            &format!("02{}", "bb".repeat(32)),
+            &"0f8b7c2e-4d1a-4e6b-9c3f-2a5d8e7b1c40"
+                .parse()
+                .expect("request id"),
             &[
                 &format!("0x{}", "aa".repeat(20)),
                 &format!("0x{}", "cc".repeat(20)),
@@ -243,8 +372,28 @@ mod tests {
         );
         assert_eq!(
             hex::encode(id),
-            "b4dd4ab6fe359956fa26f845f1881f61772d82a502b25049f1cc60e8486951e1"
+            "bf923f92df8d8c9180e8ce5ced2a70b74ebc35ae934f01f7537b0e1755485d38"
         );
+    }
+
+    #[test]
+    fn only_a_lowercase_hyphenated_uuid_is_a_request_id() {
+        let id = "0f8b7c2e-4d1a-4e6b-9c3f-2a5d8e7b1c40";
+        assert_eq!(
+            id.parse::<RequestId>().map(|id| id.as_str().to_owned()),
+            Ok(id.to_owned())
+        );
+        for bad in [
+            "0F8B7C2E-4D1A-4E6B-9C3F-2A5D8E7B1C40",
+            "0f8b7c2e4d1a4e6b9c3f2a5d8e7b1c40",
+            "{0f8b7c2e-4d1a-4e6b-9c3f-2a5d8e7b1c40}",
+            "0f8b7c2e-4d1a-4e6b-9c3f-2a5d8e7b1c4",
+            "0f8b7c2e-4d1a-4e6b-9c3f-2a5d8e7b1c4g",
+            "0f8b7c2e_4d1a-4e6b-9c3f-2a5d8e7b1c40",
+            "",
+        ] {
+            assert!(bad.parse::<RequestId>().is_err(), "{bad}");
+        }
     }
 
     /// The quarter ends from lygos-contracts `test/fixtures/quarter_vectors.json` plus the
@@ -262,6 +411,59 @@ mod tests {
             assert_eq!(maturity_label(maturity), label, "{maturity}");
         }
         assert!(event_name(1_798_210_800, &[0xab; 32]).starts_with("midnight-25DEC26-abab"));
+    }
+
+    /// dlcmsg's `QuarterLabel` table (25DEC26 is 2026Q4, 29JAN27 is 2027Q1) and the UTC edges.
+    #[test]
+    fn quarter_is_the_maturitys_utc_calendar_quarter() {
+        for (maturity, quarter) in [
+            (1_798_210_800, "2026Q4"),
+            (1_801_234_800, "2027Q1"),
+            (1_806_073_200, "2027Q1"),
+            (1_813_935_600, "2027Q2"),
+            (1_821_798_000, "2027Q3"),
+            (1_798_761_599, "2026Q4"),
+            (1_798_761_600, "2027Q1"),
+        ] {
+            assert_eq!(super::quarter(maturity), quarter, "{maturity}");
+        }
+    }
+
+    #[test]
+    fn oracle_keys_select_by_quarter_from_orange_groves_line() {
+        let q4 = "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa";
+        let q1 = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let keys: OracleKeys =
+            format!(" midnight-2026Q4-testnet4-v1:{q4} ,midnight-2027Q1-testnet4-v1:{q1},")
+                .parse()
+                .expect("keys");
+        assert_eq!(keys.check_signer(1_798_210_800, Some(q4)), Ok(()));
+        assert_eq!(keys.check_signer(1_806_073_200, Some(q1)), Ok(()));
+        assert!(keys.check_signer(1_798_210_800, Some(q1)).is_err());
+        assert!(keys.check_signer(1_798_210_800, None).is_err());
+        assert!(keys.check_signer(1_813_935_600, Some(q1)).is_err());
+        // orange-grove's own spellings that name a quarter.
+        for version in ["midnight-2026Q4:staging-v1", "midnight-2026Q4"] {
+            let keys: OracleKeys = format!("{version}:{q4}").parse().expect(version);
+            assert_eq!(
+                keys.check_signer(1_798_210_800, Some(q4)),
+                Ok(()),
+                "{version}"
+            );
+        }
+        for bad in [
+            String::new(),
+            " , ".to_owned(),
+            q4.to_owned(),
+            format!(":{q4}"),
+            format!("2026Q4:{q4}"),
+            format!("midnight-2026Q5-testnet4-v1:{q4}"),
+            format!("midnight-2026Q41-testnet4-v1:{q4}"),
+            "midnight-2026Q4-testnet4-v1:zz".to_owned(),
+            format!("midnight-2026Q4-testnet4-v1:{q4},midnight-2026Q4-testnet4-v2:{q1}"),
+        ] {
+            assert!(bad.parse::<OracleKeys>().is_err(), "{bad}");
+        }
     }
 
     #[test]
