@@ -15,7 +15,10 @@ use axum::{
     routing::{get, post},
 };
 use bitcoin::absolute::LOCK_TIME_THRESHOLD;
-use bitcoin::{Network, ScriptBuf, Txid, consensus::encode::deserialize_hex, hashes::Hash};
+use bitcoin::{
+    Network, ScriptBuf, Txid, consensus::encode::deserialize_hex, hashes::Hash,
+    secp256k1::PublicKey,
+};
 use p256::ecdsa::SigningKey;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -32,6 +35,11 @@ pub struct Config {
     pub network: Network,
     /// The Midnight authorizer's EVM address: every DLC's `termsHash` must carry its signature.
     pub lygos_authorizer: [u8; 20],
+    /// The Lygos Midnight funding key: every DLC's accepter must be this key. A Fordefi lender
+    /// co-signs every DLC from one vault key, so production pins it. Staging co-signs with dlcd-rs,
+    /// which derives a key per contract, so it runs without a pin. The binary will not start on
+    /// mainnet without one.
+    pub lygos_funding_pubkey: Option<PublicKey>,
     /// The Midnight oracle's keys, one per calendar quarter. An announcement must be signed by
     /// the key of its market's maturity quarter.
     pub oracle_keys: OracleKeys,
@@ -238,14 +246,16 @@ pub fn receipt_for(
         ));
     }
 
-    // Lygos funds from a fresh key per contract, so its key is whichever the accepter used; the
-    // authorization below is what makes it Lygos's. The refund is the trusted last resort and
-    // must pay the Lygos side: the whole funding output to the accepter.
+    // The accepter is Lygos. Where a funding key is pinned it must be that key, so a stolen
+    // authorizer cannot approve a DLC whose Lygos side its holder controls. The authorization below
+    // is what shows Lygos agreed to these terms. The refund is the trusted last resort and must pay
+    // the Lygos side: the whole funding output to the accepter.
     let offerer = dlc.offerer_funding_pubkey.as_deref().unwrap_or_default();
     let lygos = dlc.accepter_funding_pubkey.as_deref().unwrap_or_default();
     if lygos.is_empty() || offerer == lygos {
         return Err("the DLC's two funding keys must be distinct".to_owned());
     }
+    check_lygos_key(config, lygos)?;
     if announcement.contract_flags != REFUND_TO_ACCEPTER_FLAG {
         return Err("the DLC must refund to the accepter (contract flags 0x01)".to_owned());
     }
@@ -392,6 +402,21 @@ pub fn receipt_for(
     })
 }
 
+/// Where a Lygos funding key is pinned, the accepter's key must be it. Mainnet always pins one:
+/// `--lygos-funding-pubkey` is required with `--network mainnet`.
+fn check_lygos_key(config: &Config, lygos: &str) -> Result<(), String> {
+    let Some(pinned) = config.lygos_funding_pubkey else {
+        return Ok(());
+    };
+    let lygos: PublicKey = lygos
+        .parse()
+        .map_err(|_| "the DLC's Lygos funding key is not a public key".to_owned())?;
+    if lygos != pinned {
+        return Err("the DLC's Lygos funding key is not the pinned Midnight key".to_owned());
+    }
+    Ok(())
+}
+
 /// Parse the `--network` launch argument.
 ///
 /// # Errors
@@ -535,6 +560,7 @@ mod tests {
         Config {
             network: Network::Bitcoin,
             lygos_authorizer: authorizer_address(),
+            lygos_funding_pubkey: Some(LYGOS.parse().expect("key")),
             oracle_keys: format!(
                 "midnight-2026Q4-test-v1:{ORACLE},midnight-2027Q1-test-v1:{NEXT_ORACLE}"
             )
@@ -777,13 +803,13 @@ mod tests {
                 .contains("funding keys")
         );
         assert!(refused(|d, _, _| d.accepter_funding_pubkey = None).contains("funding keys"));
-        // Swapping the sides changes the terms the authorizer signed.
+        // Swapping the sides puts the borrower's key where the pinned Lygos key must be.
         assert!(
             refused(|d, _, _| {
                 d.accepter_funding_pubkey = Some(BORROWER.to_owned());
                 d.offerer_funding_pubkey = Some(LYGOS.to_owned());
             })
-            .contains("did not sign")
+            .contains("pinned Midnight key")
         );
         assert!(
             refused(|d, _, _| d.refund_tx_id = Some(Txid::from_byte_array([8; 32]).to_string()))
@@ -889,6 +915,29 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_lygos_key_other_than_the_pinned_one() {
+        let terms = authorized();
+        let pinned = Config {
+            lygos_funding_pubkey: Some(BORROWER.parse().expect("key")),
+            ..config()
+        };
+        let error = receipt_for(&pinned, &dlc(), &announcement(&terms), &lock(), &terms)
+            .expect_err("the accepter is not the pinned key");
+        assert!(error.contains("pinned Midnight key"), "{error}");
+    }
+
+    #[test]
+    fn staging_runs_without_a_pinned_lygos_key() {
+        let staging = Config {
+            network: Network::Signet,
+            lygos_funding_pubkey: None,
+            ..config()
+        };
+        assert_eq!(check_lygos_key(&staging, LYGOS), Ok(()));
+        assert_eq!(check_lygos_key(&staging, BORROWER), Ok(()));
+    }
+
+    #[test]
     fn refuses_a_forgeable_network_unless_allowed() {
         let terms = terms();
         let regtest = Config {
@@ -933,7 +982,12 @@ mod tests {
         config.network = Network::Regtest;
         assert!(attempt(&config).contains("--allow-insecure-network"));
         config.allow_insecure_network = true;
-        // It does not refund to the accepter, so no authorization would make it a Midnight DLC.
+        config.lygos_funding_pubkey = dlc
+            .accepter_funding_pubkey
+            .as_deref()
+            .map(|key| key.parse().expect("key"));
+        // Even with its own key pinned, it does not refund to the accepter, so no authorization
+        // would make it a Midnight DLC.
         assert!(
             attempt(&config).contains("refund to the accepter"),
             "{}",
