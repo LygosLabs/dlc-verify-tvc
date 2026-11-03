@@ -86,4 +86,4 @@ Each step asks for the PIN, and the key blinks when it needs a touch. The certif
 
 `tvc keys refresh-yubikey` prints the hex serial and the operator public key, 260 hex characters starting with `04`. Both are public. Send them to the person running the quorum key session, and keep a copy next to your PIN.
 
-At the session each operator runs `tvc login` to the mainnet org and `tvc operator create --kind yubikey --serial <hex serial>`; the resulting operator ids go in both sets of `tvc-configs/app.mint-attester.mainnet.json`. See [Creating an environment](README.md#creating-an-environment).
+At the session each operator runs `tvc login` to the mainnet org and `tvc operator create --kind yubikey --serial <hex serial>`; in `tvc-configs/app.mint-attester.mainnet.json`, each operator's name and public key go in `manifestSetParams.newOperators` and the id from `operator create` goes in `shareSetParams.existingOperatorIds`. See [Creating an environment](README.md#creating-an-environment).
