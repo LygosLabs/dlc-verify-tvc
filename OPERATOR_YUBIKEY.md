@@ -47,7 +47,15 @@ ykman piv access change-puk
 ykman piv access change-management-key --generate --protect
 ```
 
-At the management key prompt, leave it blank to use the default. `--protect` stores the new management key on the device behind the PIN, so there is nothing to save for it.
+`change-management-key` first asks for the current management key, `Enter the current management key [blank to use default key]`. Leave it blank: a new YubiKey still has the factory key. It then asks for the PIN. `--generate` creates a random new key and `--protect` stores it on the device behind the PIN, so there is nothing to save for it.
+
+Confirm all three changed:
+
+```sh
+ykman piv info
+```
+
+It must say `Management key is stored on the YubiKey, protected by PIN.` and show no `WARNING: Using default` lines. If any warning is left, repeat that step before generating keys.
 
 ## 3. Generate the keys
 
