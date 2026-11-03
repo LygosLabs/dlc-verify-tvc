@@ -80,11 +80,11 @@ Everything the attester pins is a launch argument, so the QOS manifest measures 
 
 ```json
 {"name": "staging", "network": "mutinynet", "allowInsecureNetwork": true,
- "lygosAuthorizer": "0x…", "lygosFundingPubkey": "02…", "midnightOracleKeys": "midnight-2026Q4-staging-v1:…",
+ "lygosAuthorizer": "0x…", "midnightOracleKeys": "midnight-2026Q4-staging-v1:…",
  "minConfirmations": 6, "chainId": 84532, "verifier": "0x…", "originator": "0x…"}
 ```
 
-`lygosFundingPubkey`, `allowInsecureNetwork` (default false) and `minConfirmations` (default 6) are optional. `chainId` and `verifier` are the receipt's EIP-712 domain, so they route each request: the profile whose `(chainId, verifier)` the request names is the only one that judges it, the request's `originator` must be that profile's, and a request naming no profile's domain is refused. `originator` is the `Originator` proxy from `lygos-contracts` `deployments/<env>.json`, never `OriginatorExt`, which runs only by delegatecall. Profiles in one enclave share its quorum key, so no two may sign for the same `(chainId, verifier)`.
+`lygosFundingPubkey` (compressed hex), `allowInsecureNetwork` (default false) and `minConfirmations` (default 6) are optional. `chainId` is a JSON number, not a string: fill the templates' quoted `REPLACE_WITH_…_CHAIN_ID` placeholder with a bare number. `chainId` and `verifier` are the receipt's EIP-712 domain, so they route each request: the profile whose `(chainId, verifier)` the request names is the only one that judges it, the request's `originator` must be that profile's, and a request naming no profile's domain is refused. `originator` is the `Originator` proxy from `lygos-contracts` `deployments/<env>.json`, never `OriginatorExt`, which runs only by delegatecall. Profiles in one enclave share its quorum key, so no two may sign for the same `(chainId, verifier)`.
 
 A mainnet profile must be the enclave's only profile, pin the funding key and its destination, and not allow an insecure network. The binary refuses to start otherwise, before it reads the quorum key, and `crates/mint-attester/tests/deploy_configs.rs` checks every committed deploy config against the same rules on every PR.
 

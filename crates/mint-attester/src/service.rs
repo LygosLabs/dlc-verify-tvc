@@ -1178,6 +1178,30 @@ mod tests {
         assert!(error.contains("no profile signs"), "{error}");
     }
 
+    /// The flat flags' single profile pins no destination, so it signs for whatever domain the
+    /// request names; only a local run can start one.
+    #[test]
+    fn an_unpinned_profile_takes_every_domain() {
+        let local = Profile {
+            name: "regtest".to_owned(),
+            network: Network::Regtest,
+            allow_insecure_network: true,
+            lygos_funding_pubkey: None,
+            destination: None,
+            ..profile()
+        };
+        let config = Config::new(SigningKey::from_slice(&[7; 32]).expect("key"), vec![local])
+            .expect("one unpinned test profile");
+        for (chain_id, verifier, originator) in
+            [(1, [0x11; 20], [0x56; 20]), (84532, [0x99; 20], [0x01; 20])]
+        {
+            let routed = config
+                .route(chain_id, &verifier, &originator)
+                .expect("any domain");
+            assert_eq!(routed.name, "regtest");
+        }
+    }
+
     #[test]
     fn config_refuses_profiles_that_may_not_share() {
         let key = || SigningKey::from_slice(&[7; 32]).expect("key");
