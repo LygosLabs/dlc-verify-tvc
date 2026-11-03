@@ -128,12 +128,18 @@ jobs:
             midnightOracleKeys: $keys, chainId: 8453,
             verifier: "0x6666666666666666666666666666666666666666",
             originator: "0x2222222222222222222222222222222222222222"}')
-          if docker run --rm --entrypoint /tvc_app -v "${key_file}:/qos.quorum.key:ro" \
+          # Under a timeout: if the rule ever broke, the server would start and never return.
+          trap 'docker rm -f mint-attester-smoke mint-attester-mixed >/dev/null 2>&1 || true' EXIT
+          if timeout 60 docker run --rm --name mint-attester-mixed \
+            --entrypoint /tvc_app -v "${key_file}:/qos.quorum.key:ro" \
             "lygoslabs-dlc-verify-tvc/${{ matrix.target.name }}:latest" \
             --port 3001 --profile "${mainnet}" \
             --profile "$(profile testnet4 testnet4 0x4444444444444444444444444444444444444444)" \
             2>"${RUNNER_TEMP}/mixed.err"; then
             echo "mainnet started beside testnet4"
+            exit 1
+          elif [ $? -eq 124 ]; then
+            echo "mainnet beside testnet4 was still running after 60s"
             exit 1
           fi
           grep -q 'must be the enclave.s only profile' "${RUNNER_TEMP}/mixed.err"

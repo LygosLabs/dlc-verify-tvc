@@ -64,9 +64,32 @@ struct ProfileJson {
     midnight_oracle_keys: String,
     #[serde(default = "default_min_confirmations")]
     min_confirmations: u32,
+    #[serde(deserialize_with = "chain_id")]
     chain_id: u64,
     verifier: String,
     originator: String,
+}
+
+/// A chain id as a JSON number or a decimal string, so a template's quoted placeholder can be
+/// filled in place.
+fn chain_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ChainId {
+        Number(u64),
+        Text(String),
+    }
+    match ChainId::deserialize(deserializer)? {
+        ChainId::Number(id) => Ok(id),
+        ChainId::Text(text)
+            if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            text.parse().map_err(serde::de::Error::custom)
+        }
+        ChainId::Text(text) => Err(serde::de::Error::custom(format!(
+            "chainId {text:?} is not a decimal number"
+        ))),
+    }
 }
 
 /// The confirmation floor when a launch does not set one.
@@ -241,6 +264,27 @@ mod tests {
         assert!(parse_profile(&zero).expect_err("zero").contains("verifier"));
         let no_destination = r#"{"name":"x","network":"testnet4","lygosAuthorizer":"0x1111111111111111111111111111111111111111","midnightOracleKeys":"bad"}"#;
         assert!(parse_profile(no_destination).is_err());
+    }
+
+    #[test]
+    fn chain_id_is_a_number_or_a_decimal_string() {
+        let base = json(
+            "x",
+            "testnet4",
+            "0x3333333333333333333333333333333333333333",
+        );
+        let with = |chain_id: &str| parse_profile(&base.replace("84532", chain_id));
+        let quoted = with("\"8453\"").expect("a quoted chain id fills a quoted placeholder");
+        assert_eq!(quoted.destination.expect("pinned").chain_id, 8453);
+        for bad in [
+            "\"\"",
+            "\"0x2105\"",
+            "\"-1\"",
+            "\"REPLACE_WITH_CHAIN_ID\"",
+            "-1",
+        ] {
+            assert!(with(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

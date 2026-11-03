@@ -48,7 +48,8 @@ fn launch_args(env: &str) -> Vec<String> {
             }
             filled += 1;
             *value = match field.as_str() {
-                "chainId" => Value::from(1),
+                // Filled the way an operator would: the placeholder text replaced in place.
+                "chainId" => Value::from("8453"),
                 "lygosAuthorizer" | "verifier" | "originator" => {
                     Value::from(format!("0x{}", format!("{filled:02x}").repeat(20)))
                 }
