@@ -113,7 +113,7 @@ A release that changes the receipt format needs a new `Verifier` first: deploy i
 
 ### Creating an environment
 
-Once per environment, from `tvc-configs/*.mint-attester.example.json`:
+Once per environment, from `tvc-configs/*.mint-attester.example.json`. For mainnet, each operator first sets up a YubiKey with [OPERATOR_YUBIKEY.md](OPERATOR_YUBIKEY.md).
 
 1. Generate the quorum key, split 2-of-3 to the operators. Write both files outside the repository; the metadata file holds the encrypted shares.
    ```bash
