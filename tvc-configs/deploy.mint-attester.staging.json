@@ -8,13 +8,10 @@
     "0.0.0.0",
     "--port",
     "3000",
-    "--network",
-    "mutinynet",
-    "--allow-insecure-network",
-    "--lygos-authorizer",
-    "0x769160E18E574547ca387867decfbd1c2d0E9dEa",
-    "--midnight-oracle-keys",
-    "REPLACE_WITH_STAGING_MIDNIGHT_ORACLE_KEYS"
+    "--profile",
+    "{\"name\":\"staging\",\"network\":\"mutinynet\",\"allowInsecureNetwork\":true,\"lygosAuthorizer\":\"0x769160E18E574547ca387867decfbd1c2d0E9dEa\",\"midnightOracleKeys\":\"REPLACE_WITH_STAGING_MIDNIGHT_ORACLE_KEYS\",\"minConfirmations\":6,\"chainId\":84532,\"verifier\":\"0xb468495e3A960E3fB95694d9f0400cba4AD3e0f6\",\"originator\":\"0x2066508A76a50A9c474eF9857dE0D80360C884eb\"}",
+    "--profile",
+    "{\"name\":\"testnet4\",\"network\":\"testnet4\",\"allowInsecureNetwork\":true,\"lygosAuthorizer\":\"REPLACE_WITH_TESTNET4_MIDNIGHT_AUTHORIZER_ADDRESS\",\"midnightOracleKeys\":\"REPLACE_WITH_TESTNET4_MIDNIGHT_ORACLE_KEYS\",\"minConfirmations\":6,\"chainId\":84532,\"verifier\":\"REPLACE_WITH_TESTNET4_VERIFIER_PINNING_THIS_APPS_KEY\",\"originator\":\"0x40466Dce97fd0704D7ebbfEA7620c7c34599EAeA\"}"
   ],
   "expectedPivotDigest": "430f79ad700ba4667590f11e62da9cc16009d9a589fdeff813cb8d31ea568e05",
   "dangerousDeployDebugMode": false,

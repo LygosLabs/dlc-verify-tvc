@@ -2,7 +2,9 @@
 //! `Verifier.sol` accepts.
 
 pub mod authorizer;
+pub mod cli;
 pub mod midnight;
+pub mod profile;
 pub mod receipt;
 pub mod service;
 pub mod spv;

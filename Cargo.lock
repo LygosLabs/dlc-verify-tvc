@@ -2004,6 +2004,7 @@ dependencies = [
  "clap",
  "ddk-messages",
  "hex",
+ "http-body-util",
  "lightning",
  "p256",
  "qos_core",

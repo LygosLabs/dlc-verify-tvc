@@ -31,5 +31,6 @@ workspace = true
 
 [dev-dependencies]
 ddk-messages = { workspace = true }
+http-body-util = { workspace = true }
 lightning = { workspace = true }
 tower = { workspace = true, features = ["util"] }

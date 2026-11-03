@@ -2,7 +2,8 @@
 
 use crate::{
     authorizer,
-    midnight::{self, OracleKeys, REFUND_GAP_SECS, RequestId, Terms},
+    midnight::{self, REFUND_GAP_SECS, RequestId, Terms},
+    profile::{Profile, validate},
     receipt::{Domain, Receipt, sign_digest},
     spv::{Lock, LockProof, verify_lock},
 };
@@ -28,29 +29,67 @@ use tower_http::timeout::TimeoutLayer;
 use verifier_core::{OfferAnnouncement, offer_announcement, verify_dlc_compatibility};
 use verifier_schema::{DlcVerifyResult, VerificationStatus};
 
-/// What the enclave pins. All of it comes from launch arguments the QOS manifest measures, except
-/// the key, which QOS provisions.
+/// The quorum signing key the `Verifier` contracts trust, and the profiles it signs for. The key
+/// comes from QOS; the profiles from launch arguments the QOS manifest measures. Built only by
+/// [`Config::new`], so a set of profiles that may not share an enclave never serves a request.
 pub struct Config {
-    /// Bitcoin network the locks are on.
-    pub network: Network,
-    /// The Midnight authorizer's EVM address: every DLC's `termsHash` must carry its signature.
-    pub lygos_authorizer: [u8; 20],
-    /// The Lygos Midnight funding key: every DLC's accepter must be this key. A Fordefi lender
-    /// co-signs every DLC from one vault key, so production pins it. Staging co-signs with dlcd-rs,
-    /// which derives a key per contract, so it runs without a pin. The binary will not start on
-    /// mainnet without one.
-    pub lygos_funding_pubkey: Option<PublicKey>,
-    /// The Midnight oracle's keys, one per calendar quarter. An announcement must be signed by
-    /// the key of its market's maturity quarter.
-    pub oracle_keys: OracleKeys,
-    /// The quorum signing key the `Verifier` contract trusts.
-    pub key: SigningKey,
-    /// Sign receipts for a network whose proof of work is free to forge. Test deployments only.
-    pub allow_insecure_network: bool,
-    /// Fewest headers that must confirm the funding block before a receipt is signed. The SPV
-    /// check proves work, not membership in the real chain, so this is the enclave's own floor on
-    /// how much work a forged lock costs; the `Verifier` contract may require more.
-    pub min_confirmations: u32,
+    key: SigningKey,
+    profiles: Vec<Profile>,
+}
+
+impl Config {
+    /// Check the profiles may share this enclave, then pair them with the key.
+    ///
+    /// # Errors
+    ///
+    /// Returns the rule in [`validate`] the profiles break.
+    pub fn new(key: SigningKey, profiles: Vec<Profile>) -> Result<Self, String> {
+        validate(&profiles)?;
+        Ok(Self { key, profiles })
+    }
+
+    /// The profiles this enclave serves.
+    pub fn profiles(&self) -> &[Profile] {
+        &self.profiles
+    }
+
+    /// The one profile that signs for this receipt domain, `(chainId, verifier)`, checked against
+    /// the profile's `Originator`. A profile without a destination is the enclave's only profile
+    /// and takes every domain. A request never falls back to another profile.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no profile signs for the domain, or the originator is not that profile's.
+    pub fn route(
+        &self,
+        chain_id: u64,
+        verifier: &[u8; 20],
+        originator: &[u8; 20],
+    ) -> Result<&Profile, String> {
+        let mut serving = self.profiles.iter().filter(|profile| {
+            profile.destination.is_none_or(|destination| {
+                destination.chain_id == chain_id && &destination.verifier == verifier
+            })
+        });
+        let profile = serving.next().ok_or_else(|| {
+            format!(
+                "no profile signs for verifier 0x{} on chain {chain_id}",
+                hex::encode(verifier)
+            )
+        })?;
+        if serving.next().is_some() {
+            return Err("more than one profile signs for this verifier".to_owned());
+        }
+        if let Some(destination) = profile.destination
+            && &destination.originator != originator
+        {
+            return Err(format!(
+                "the originator is not the {} profile's",
+                profile.name
+            ));
+        }
+        Ok(profile)
+    }
 }
 
 /// Body of `POST /v1/attest`. Hex throughout; EVM values may carry a `0x` prefix.
@@ -134,6 +173,8 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
         request_id: request.request_id.parse()?,
     };
     let verifier = fixed("verifier", &request.verifier)?;
+    // Every check below uses this profile's pins and nothing else.
+    let profile = config.route(terms.chain_id, &verifier, &terms.originator)?;
 
     // The cheap parse first: reconstruction allocates per outcome, and a Midnight list is a
     // handful of entries, so an oversized one is refused before any signature work.
@@ -148,7 +189,7 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
         &request.accept,
         Some(&request.sign),
         None,
-        Some(network_name(config.network)),
+        Some(network_name(profile.network)),
     );
 
     let proof = LockProof {
@@ -181,10 +222,10 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
             })
             .collect::<Result<_, _>>()?,
     };
-    let lock = verify_lock(config.network, &proof)
+    let lock = verify_lock(profile.network, &proof)
         .map_err(|error| format!("lock proof refused: {error}"))?;
 
-    let receipt = receipt_for(config, &dlc, &announcement, &lock, &terms)?;
+    let receipt = receipt_for(profile, &dlc, &announcement, &lock, &terms)?;
     let digest = receipt.digest(&Domain {
         chain_id: receipt.chain_id,
         verifier,
@@ -217,7 +258,7 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
 ///
 /// Returns the first policy check that fails.
 pub fn receipt_for(
-    config: &Config,
+    profile: &Profile,
     dlc: &DlcVerifyResult,
     announcement: &OfferAnnouncement,
     lock: &Lock,
@@ -233,16 +274,16 @@ pub fn receipt_for(
             .join(" ")
         ));
     }
-    if config.network != Network::Bitcoin && !config.allow_insecure_network {
+    if profile.network != Network::Bitcoin && !profile.allow_insecure_network {
         return Err("this network's proof of work is free to forge; pass --allow-insecure-network for a test deployment".to_owned());
     }
-    if &announcement.chain_hash != config.network.chain_hash().as_bytes() {
+    if &announcement.chain_hash != profile.network.chain_hash().as_bytes() {
         return Err("the DLC is for another Bitcoin network".to_owned());
     }
-    if lock.confirmations < config.min_confirmations {
+    if lock.confirmations < profile.min_confirmations {
         return Err(format!(
             "the funding transaction has {} confirmation(s); at least {} are required",
-            lock.confirmations, config.min_confirmations
+            lock.confirmations, profile.min_confirmations
         ));
     }
 
@@ -255,7 +296,7 @@ pub fn receipt_for(
     if lygos.is_empty() || offerer == lygos {
         return Err("the DLC's two funding keys must be distinct".to_owned());
     }
-    check_lygos_key(config, lygos)?;
+    check_lygos_key(profile, lygos)?;
     if announcement.contract_flags != REFUND_TO_ACCEPTER_FLAG {
         return Err("the DLC must refund to the accepter (contract flags 0x01)".to_owned());
     }
@@ -265,7 +306,7 @@ pub fn receipt_for(
     if market.chain_id != terms.chain_id {
         return Err("the market is on another chain".to_owned());
     }
-    config
+    profile
         .oracle_keys
         .check_signer(market.maturity, dlc.extracted_oracle_pubkey.as_deref())?;
     let refund_locktime = u64::from(
@@ -376,7 +417,7 @@ pub fn receipt_for(
     }
     .hash();
     let approval = authorizer::digest(terms.chain_id, &terms.originator, &terms_hash);
-    if authorizer::signer(&approval, &terms.authorization)? != config.lygos_authorizer {
+    if authorizer::signer(&approval, &terms.authorization)? != profile.lygos_authorizer {
         return Err("the Midnight authorizer did not sign this DLC's terms".to_owned());
     }
 
@@ -404,8 +445,8 @@ pub fn receipt_for(
 
 /// Where a Lygos funding key is pinned, the accepter's key must be it. Mainnet always pins one:
 /// `--lygos-funding-pubkey` is required with `--network mainnet`.
-fn check_lygos_key(config: &Config, lygos: &str) -> Result<(), String> {
-    let Some(pinned) = config.lygos_funding_pubkey else {
+fn check_lygos_key(profile: &Profile, lygos: &str) -> Result<(), String> {
+    let Some(pinned) = profile.lygos_funding_pubkey else {
         return Ok(());
     };
     let lygos: PublicKey = lygos
@@ -479,7 +520,17 @@ const BODY_READ_LIMIT: Duration = Duration::from_secs(5);
 /// Build the attester's router.
 pub fn router(config: Config) -> Router {
     Router::new()
-        .route("/health", get(async || Json(json!({"status": "healthy"}))))
+        .route(
+            "/health",
+            get(async |State(config): State<Arc<Config>>| {
+                let profiles: Vec<&str> = config
+                    .profiles
+                    .iter()
+                    .map(|profile| profile.name.as_str())
+                    .collect();
+                Json(json!({"status": "healthy", "profiles": profiles}))
+            }),
+        )
         .route("/v1/attest", post(handle))
         .layer(DefaultBodyLimit::max(7 * 1024 * 1024))
         .layer(TimeoutLayer::with_status_code(
@@ -531,6 +582,7 @@ async fn handle(State(config): State<Arc<Config>>, request: Request) -> Response
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::profile::Destination;
     use verifier_schema::{CetTransactionInfo, OutcomeInfo};
 
     // The generator and twice the generator: real points, so the typed config parses them.
@@ -556,8 +608,10 @@ mod tests {
             .expect("address")
     }
 
-    fn config() -> Config {
-        Config {
+    /// A mainnet profile signing for verifier `0x11…` and originator `0x56…` on chain 8453.
+    fn profile() -> Profile {
+        Profile {
+            name: "test".to_owned(),
             network: Network::Bitcoin,
             lygos_authorizer: authorizer_address(),
             lygos_funding_pubkey: Some(LYGOS.parse().expect("key")),
@@ -566,10 +620,22 @@ mod tests {
             )
             .parse()
             .expect("keys"),
-            key: SigningKey::from_slice(&[7; 32]).expect("key"),
             allow_insecure_network: false,
             min_confirmations: 1,
+            destination: Some(Destination {
+                chain_id: 8453,
+                verifier: [0x11; 20],
+                originator: [0x56; 20],
+            }),
         }
+    }
+
+    fn config() -> Config {
+        Config::new(
+            SigningKey::from_slice(&[7; 32]).expect("key"),
+            vec![profile()],
+        )
+        .expect("config")
     }
 
     fn terms() -> LoanTerms {
@@ -709,7 +775,7 @@ mod tests {
     #[test]
     fn issues_a_receipt_for_a_midnight_dlc() {
         let terms = authorized();
-        let receipt = receipt_for(&config(), &dlc(), &announcement(&terms), &lock(), &terms)
+        let receipt = receipt_for(&profile(), &dlc(), &announcement(&terms), &lock(), &terms)
             .expect("receipt");
         assert_eq!(receipt.sats, 50_000_000);
         assert_eq!(receipt.expires_at, terms.mint_deadline);
@@ -733,7 +799,7 @@ mod tests {
             }
         }
         let receipt =
-            receipt_for(&config(), &dlc, &announcement(&terms), &lock(), &terms).expect("receipt");
+            receipt_for(&profile(), &dlc, &announcement(&terms), &lock(), &terms).expect("receipt");
         assert_eq!(receipt.terms_hash, terms_hash(&terms));
     }
 
@@ -748,7 +814,7 @@ mod tests {
                     outcome.accepter_payout_override = Some(format!("5120{}", "ab".repeat(32)));
                 }
             }
-            let error = receipt_for(&config(), &dlc, &announcement(&terms), &lock(), &terms)
+            let error = receipt_for(&profile(), &dlc, &announcement(&terms), &lock(), &terms)
                 .expect_err("an override on a borrower outcome");
             assert!(error.contains("must not be redirected"), "{label}: {error}");
         }
@@ -761,7 +827,7 @@ mod tests {
         let announcement = announcement(&terms);
         let hash = terms_hash(&terms);
         let attempt = |terms: &LoanTerms| {
-            receipt_for(&config(), &dlc, &announcement, &lock, terms).expect_err("refused")
+            receipt_for(&profile(), &dlc, &announcement, &lock, terms).expect_err("refused")
         };
         let unsigned = attempt(&terms);
         assert!(unsigned.contains("invalid authorization"), "{unsigned}");
@@ -782,7 +848,7 @@ mod tests {
         );
         elsewhere.chain_id = terms.chain_id;
         assert!(attempt(&elsewhere).contains("did not sign"));
-        assert!(receipt_for(&config(), &dlc, &announcement, &lock, &authorized()).is_ok());
+        assert!(receipt_for(&profile(), &dlc, &announcement, &lock, &authorized()).is_ok());
     }
 
     #[test]
@@ -792,7 +858,8 @@ mod tests {
             // The announcement is fixed before the edit, as the oracle signs it before the request.
             let announcement = announcement(&terms);
             edit(&mut dlc, &mut terms, &mut lock);
-            receipt_for(&config(), &dlc, &announcement, &lock, &terms).expect_err("must be refused")
+            receipt_for(&profile(), &dlc, &announcement, &lock, &terms)
+                .expect_err("must be refused")
         };
         assert!(
             refused(|d, _, _| d.verification_status = VerificationStatus::Incomplete)
@@ -821,9 +888,9 @@ mod tests {
         );
         assert!(refused(|_, t, _| t.chain_id = 1).contains("another chain"));
         assert!(refused(|_, _, l| l.confirmations = 0).contains("confirmation"));
-        let strict = Config {
+        let strict = Profile {
             min_confirmations: 6,
-            ..config()
+            ..profile()
         };
         assert!(
             receipt_for(
@@ -859,7 +926,7 @@ mod tests {
         let mut each_party = announcement(&terms());
         each_party.contract_flags = 0;
         assert!(
-            receipt_for(&config(), &dlc(), &each_party, &lock(), &authorized())
+            receipt_for(&profile(), &dlc(), &each_party, &lock(), &authorized())
                 .expect_err("must be refused")
                 .contains("refund to the accepter")
         );
@@ -880,7 +947,7 @@ mod tests {
         let mut terms = terms();
         let announcement = announcement(&terms);
         terms.announced_at += 1;
-        let error = receipt_for(&config(), &dlc(), &announcement, &lock(), &terms)
+        let error = receipt_for(&profile(), &dlc(), &announcement, &lock(), &terms)
             .expect_err("announcedAt is under the oracle's signature");
         assert!(error.contains("event id"), "{error}");
     }
@@ -890,22 +957,22 @@ mod tests {
     #[test]
     fn only_the_maturity_quarters_oracle_key_may_sign() {
         let terms = authorized();
-        let attempt = |config: &Config, dlc: &DlcVerifyResult| {
+        let attempt = |config: &Profile, dlc: &DlcVerifyResult| {
             receipt_for(config, dlc, &announcement(&terms), &lock(), &terms)
         };
-        assert!(attempt(&config(), &dlc()).is_ok());
+        assert!(attempt(&profile(), &dlc()).is_ok());
         let mut next_quarters = dlc();
         next_quarters.extracted_oracle_pubkey = Some(NEXT_ORACLE.to_owned());
-        let error = attempt(&config(), &next_quarters).expect_err("2027Q1 key on a 2026Q4 market");
+        let error = attempt(&profile(), &next_quarters).expect_err("2027Q1 key on a 2026Q4 market");
         assert!(
             error.contains("not signed by the 2026Q4 oracle key"),
             "{error}"
         );
-        let unpinned = Config {
+        let unpinned = Profile {
             oracle_keys: format!("midnight-2027Q1-test-v1:{ORACLE}")
                 .parse()
                 .expect("keys"),
-            ..config()
+            ..profile()
         };
         let error = attempt(&unpinned, &dlc()).expect_err("no 2026Q4 key");
         assert!(
@@ -917,9 +984,9 @@ mod tests {
     #[test]
     fn refuses_a_lygos_key_other_than_the_pinned_one() {
         let terms = authorized();
-        let pinned = Config {
+        let pinned = Profile {
             lygos_funding_pubkey: Some(BORROWER.parse().expect("key")),
-            ..config()
+            ..profile()
         };
         let error = receipt_for(&pinned, &dlc(), &announcement(&terms), &lock(), &terms)
             .expect_err("the accepter is not the pinned key");
@@ -928,10 +995,10 @@ mod tests {
 
     #[test]
     fn staging_runs_without_a_pinned_lygos_key() {
-        let staging = Config {
+        let staging = Profile {
             network: Network::Signet,
             lygos_funding_pubkey: None,
-            ..config()
+            ..profile()
         };
         assert_eq!(check_lygos_key(&staging, LYGOS), Ok(()));
         assert_eq!(check_lygos_key(&staging, BORROWER), Ok(()));
@@ -940,14 +1007,14 @@ mod tests {
     #[test]
     fn refuses_a_forgeable_network_unless_allowed() {
         let terms = terms();
-        let regtest = Config {
+        let regtest = Profile {
             network: Network::Regtest,
-            ..config()
+            ..profile()
         };
         let error = receipt_for(&regtest, &dlc(), &announcement(&terms), &lock(), &terms)
             .expect_err("regtest proofs are free");
         assert!(error.contains("--allow-insecure-network"), "{error}");
-        let allowed = Config {
+        let allowed = Profile {
             allow_insecure_network: true,
             ..regtest
         };
@@ -974,8 +1041,8 @@ mod tests {
         let announcement = offer_announcement(field("offer")).expect("announcement");
         assert_eq!(Some(&announcement.event_id), dlc.oracle_event_id.as_ref());
 
-        let mut config = config();
-        let attempt = |config: &Config| {
+        let mut config = profile();
+        let attempt = |config: &Profile| {
             receipt_for(config, &dlc, &announcement, &lock(), &terms()).expect_err("refused")
         };
         assert!(attempt(&config).contains("network"));
@@ -1058,6 +1125,101 @@ mod tests {
         unauthorized.authorization = String::new();
         let error = attest(&config, &unauthorized).expect_err("no authorization");
         assert!(error.contains("no Midnight authorization"), "{error}");
+    }
+
+    /// Two test profiles in one enclave: the request's verifier picks the profile, and that
+    /// profile's network alone judges the DLC. Nothing falls through to the other profile.
+    #[test]
+    fn shared_profiles_route_by_verifier_and_never_cross() {
+        let (_, request) = fixture_request();
+        let test_profile = |name: &str, network, verifier| Profile {
+            name: name.to_owned(),
+            network,
+            allow_insecure_network: true,
+            lygos_funding_pubkey: None,
+            destination: Some(Destination {
+                chain_id: 8453,
+                verifier,
+                originator: [0x56; 20],
+            }),
+            ..profile()
+        };
+        let config = Config::new(
+            SigningKey::from_slice(&[7; 32]).expect("key"),
+            vec![
+                test_profile("regtest", Network::Regtest, [0x11; 20]),
+                test_profile("testnet4", Network::Testnet4, [0x22; 20]),
+            ],
+        )
+        .expect("two test profiles share");
+        let to = |verifier: [u8; 20], originator: [u8; 20]| AttestRequest {
+            verifier: format!("0x{}", hex::encode(verifier)),
+            originator: format!("0x{}", hex::encode(originator)),
+            ..fixture_request().1
+        };
+
+        // The fixture is a regtest DLC: its own profile takes it past the network check, the
+        // testnet4 profile refuses it.
+        let own = attest(&config, &to([0x11; 20], [0x56; 20])).expect_err("not a Midnight DLC");
+        assert!(!own.contains("another Bitcoin network"), "{own}");
+        let other = attest(&config, &to([0x22; 20], [0x56; 20])).expect_err("wrong network");
+        assert!(other.contains("another Bitcoin network"), "{other}");
+
+        let unknown = attest(&config, &to([0x33; 20], [0x56; 20])).expect_err("no profile");
+        assert!(
+            unknown.contains("no profile signs for verifier"),
+            "{unknown}"
+        );
+        let crossed = attest(&config, &to([0x22; 20], [0x57; 20])).expect_err("not its originator");
+        assert!(crossed.contains("not the testnet4 profile's"), "{crossed}");
+        let mut other_chain = request;
+        other_chain.chain_id = 84532;
+        let error = attest(&config, &other_chain).expect_err("the domain is per chain");
+        assert!(error.contains("no profile signs"), "{error}");
+    }
+
+    #[test]
+    fn config_refuses_profiles_that_may_not_share() {
+        let key = || SigningKey::from_slice(&[7; 32]).expect("key");
+        let error = Config::new(
+            key(),
+            vec![
+                profile(),
+                Profile {
+                    name: "other".to_owned(),
+                    network: Network::Testnet4,
+                    ..profile()
+                },
+            ],
+        )
+        .err()
+        .expect("mainnet shares");
+        assert!(error.contains("only profile"), "{error}");
+        assert!(Config::new(key(), vec![]).is_err());
+    }
+
+    #[tokio::test]
+    async fn health_lists_the_profiles() {
+        use axum::{body::Body, http::Request};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let response = router(config())
+            .oneshot(
+                Request::get("/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let body: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(body, json!({"status": "healthy", "profiles": ["test"]}));
     }
 
     /// An offer naming every liquidator the Originator can register gets past the outcome cap;

@@ -8,14 +8,8 @@
     "0.0.0.0",
     "--port",
     "3000",
-    "--network",
-    "mainnet",
-    "--lygos-authorizer",
-    "REPLACE_WITH_MIDNIGHT_AUTHORIZER_ADDRESS",
-    "--lygos-funding-pubkey",
-    "REPLACE_WITH_MIDNIGHT_FORDEFI_FUNDING_PUBKEY",
-    "--midnight-oracle-keys",
-    "REPLACE_WITH_MIDNIGHT_ORACLE_KEYS"
+    "--profile",
+    "{\"name\":\"example\",\"network\":\"mainnet\",\"lygosAuthorizer\":\"REPLACE_WITH_EXAMPLE_MIDNIGHT_AUTHORIZER_ADDRESS\",\"lygosFundingPubkey\":\"REPLACE_WITH_EXAMPLE_MIDNIGHT_FORDEFI_FUNDING_PUBKEY\",\"midnightOracleKeys\":\"REPLACE_WITH_EXAMPLE_MIDNIGHT_ORACLE_KEYS\",\"minConfirmations\":6,\"chainId\":\"REPLACE_WITH_EXAMPLE_CHAIN_ID\",\"verifier\":\"REPLACE_WITH_EXAMPLE_VERIFIER_ADDRESS\",\"originator\":\"REPLACE_WITH_EXAMPLE_ORIGINATOR_ADDRESS\"}"
   ],
   "expectedPivotDigest": "REPLACE_WITH_TVC_APP_ELF_SHA256",
   "dangerousDeployDebugMode": false,

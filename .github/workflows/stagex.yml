@@ -65,17 +65,24 @@ jobs:
           set -euo pipefail
           key_file="${RUNNER_TEMP}/qos.quorum.key"
           openssl rand -hex 32 > "${key_file}"
-          # Throwaway keys: a dummy authorizer address and the secp256k1 generator's x coordinate,
-          # pinned for one quarter.
+          # Two profiles sharing one enclave, as the dev deployment runs: throwaway authorizer and
+          # destinations, and the secp256k1 generator's x coordinate as the oracle key.
+          oracle_keys=midnight-2026Q4-smoke-v1:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+          profile() {
+            jq -cn --arg name "$1" --arg network "$2" --arg verifier "$3" --arg keys "${oracle_keys}" \
+              '{name: $name, network: $network, allowInsecureNetwork: true,
+                lygosAuthorizer: "0x1111111111111111111111111111111111111111",
+                midnightOracleKeys: $keys, chainId: 1, verifier: $verifier,
+                originator: "0x2222222222222222222222222222222222222222"}'
+          }
           docker run --rm -d \
             --name mint-attester-smoke \
             --entrypoint /tvc_app \
             -p 127.0.0.1:3000:3000 \
             -v "${key_file}:/qos.quorum.key:ro" \
             "lygoslabs-dlc-verify-tvc/${{ matrix.target.name }}:latest" \
-            --network regtest --allow-insecure-network \
-            --lygos-authorizer 0x1111111111111111111111111111111111111111 \
-            --midnight-oracle-keys midnight-2026Q4-smoke-v1:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+            --profile "$(profile regtest regtest 0x3333333333333333333333333333333333333333)" \
+            --profile "$(profile testnet4 testnet4 0x4444444444444444444444444444444444444444)"
           trap 'docker rm -f mint-attester-smoke >/dev/null 2>&1 || true' EXIT
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:3000/health >/dev/null; then
@@ -87,23 +94,49 @@ jobs:
             fi
             sleep 1
           done
+          curl --fail --silent http://127.0.0.1:3000/health | jq -e '.profiles == ["regtest", "testnet4"]'
           # A well-formed request with no lock proof must reach the SPV check and be refused there.
           genesis_coinbase=01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000
-          jq --arg tx "${genesis_coinbase}" '{offer, accept, sign, tx: $tx, txIndex: 0, merkleBranch: [], headers: [], market: "", chainId: 1,
-               originator: "0x0000000000000000000000000000000000000000",
-               controller: "0x0000000000000000000000000000000000000000",
-               mintDeadline: 0, announcedAt: 0,
-               requestId: "00000000-0000-0000-0000-000000000000",
-               verifier: "0x0000000000000000000000000000000000000000",
-               authorization: ("0x" + ("00" * 65))}' \
-            crates/verifier-core/tests/fixtures/testnet-loan-118c9fc9.json > "${RUNNER_TEMP}/attest-request.json"
-          status=$(curl --silent --output "${RUNNER_TEMP}/attest-response.json" --write-out '%{http_code}' \
-            -H 'content-type: application/json' \
-            --data-binary "@${RUNNER_TEMP}/attest-request.json" \
-            http://127.0.0.1:3000/v1/attest)
-          cat "${RUNNER_TEMP}/attest-response.json"
-          test "${status}" -eq 422
-          grep -q 'lock proof refused: NoHeaders' "${RUNNER_TEMP}/attest-response.json"
+          attest() {
+            jq --arg tx "${genesis_coinbase}" --arg verifier "$1" '{offer, accept, sign, tx: $tx, txIndex: 0, merkleBranch: [], headers: [], market: "", chainId: 1,
+                 originator: "0x2222222222222222222222222222222222222222",
+                 controller: "0x0000000000000000000000000000000000000000",
+                 mintDeadline: 0, announcedAt: 0,
+                 requestId: "00000000-0000-0000-0000-000000000000",
+                 verifier: $verifier,
+                 authorization: ("0x" + ("00" * 65))}' \
+              crates/verifier-core/tests/fixtures/testnet-loan-118c9fc9.json > "${RUNNER_TEMP}/attest-request.json"
+            status=$(curl --silent --output "${RUNNER_TEMP}/attest-response.json" --write-out '%{http_code}' \
+              -H 'content-type: application/json' \
+              --data-binary "@${RUNNER_TEMP}/attest-request.json" \
+              http://127.0.0.1:3000/v1/attest)
+            cat "${RUNNER_TEMP}/attest-response.json"
+            echo
+            test "${status}" -eq 422
+          }
+          # Each profile's verifier routes to it and reaches the SPV check; any other is refused.
+          for verifier in 0x3333333333333333333333333333333333333333 0x4444444444444444444444444444444444444444; do
+            attest "${verifier}"
+            grep -q 'lock proof refused: NoHeaders' "${RUNNER_TEMP}/attest-response.json"
+          done
+          attest 0x5555555555555555555555555555555555555555
+          grep -q 'no profile signs for verifier' "${RUNNER_TEMP}/attest-response.json"
+          # Mainnet beside a test network never starts.
+          mainnet=$(jq -cn --arg keys "${oracle_keys}" '{name: "production", network: "mainnet",
+            lygosAuthorizer: "0x1111111111111111111111111111111111111111",
+            lygosFundingPubkey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            midnightOracleKeys: $keys, chainId: 8453,
+            verifier: "0x6666666666666666666666666666666666666666",
+            originator: "0x2222222222222222222222222222222222222222"}')
+          if docker run --rm --entrypoint /tvc_app -v "${key_file}:/qos.quorum.key:ro" \
+            "lygoslabs-dlc-verify-tvc/${{ matrix.target.name }}:latest" \
+            --port 3001 --profile "${mainnet}" \
+            --profile "$(profile testnet4 testnet4 0x4444444444444444444444444444444444444444)" \
+            2>"${RUNNER_TEMP}/mixed.err"; then
+            echo "mainnet started beside testnet4"
+            exit 1
+          fi
+          grep -q 'must be the enclave.s only profile' "${RUNNER_TEMP}/mixed.err"
 
       - name: Smoke test packaged verifier
         if: matrix.target.name == 'dlc-verify-tvc'

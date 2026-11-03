@@ -6,7 +6,7 @@
 #   scripts/fordefi-authorizer.sh verify <transaction id> <chain id> <originator>
 #
 # create makes an EVM vault and prints its id and address; the address is the deploy config's
-# --lygos-authorizer. check has the vault sign MidnightAuthorization over an all-zero termsHash,
+# profile's lygosAuthorizer. check has the vault sign MidnightAuthorization over an all-zero termsHash,
 # which names no DLC, and recovers the signer with the enclave's code. verify re-reads a check
 # that was left waiting for approval.
 #
