@@ -127,14 +127,6 @@ CI authenticates with `TVC_ORG_ID`, `TVC_API_KEY_PUBLIC`, and `TVC_API_KEY_PRIVA
 
 A release that changes the receipt format needs a new `Verifier` first: deploy it, queue the pointer change, execute after the timelock, then merge to `master` and set the new deployment live.
 
-### Opening a production release PR
-
-After staging/testnet4 QA, run **Actions → Open production release PR → Run workflow**, selecting `dev`. The action opens a `dev` → `master` PR, reuses an existing open one, or exits without creating one when there are no commits to release. It does not merge or deploy. Further pushes to `dev` update the release PR, so review its final head before merging.
-
-The workflow must first be merged into the repository's default branch to appear in Actions. It only runs its job on `dev`. Enable **Allow GitHub Actions to create and approve pull requests** in repository Actions settings when using the default `GITHUB_TOKEN`. GitHub documents that PR CI opened by that token waits for a user with write access to select **Approve workflows to run** on the PR. A repository-scoped GitHub App token or PAT in `RELEASE_PR_TOKEN` allows PR CI to start automatically without that prompt. Give that token repository contents read and pull requests write access, plus access required by the workflows it triggers. Existing branch protection and review requirements still apply.
-
-After merging, `stagex` uses the GitHub `production` environment to create the pending mainnet deployment. Two YubiKey operators approve and provision it manually. See the [production setup and release runbook](https://github.com/LygosLabs/morpho-midnight-planning/blob/master/docs/production-tvc-yubikey-setup.md) for the release steps, key-share commands and rollback procedure. Documentation-only changes can skip `stagex` because of its path filter; run that workflow manually on `master` when a deployment is needed.
-
 ### Creating an environment
 
 Once per environment, from `tvc-configs/*.mint-attester.example.json`. For mainnet, each operator first sets up a YubiKey with [OPERATOR_YUBIKEY.md](OPERATOR_YUBIKEY.md).
