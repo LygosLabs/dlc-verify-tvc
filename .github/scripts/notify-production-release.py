@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Notify the configured Slack webhook after a production candidate is created."""
+import http.client
 import json
 import os
 import sys
-import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -55,7 +55,7 @@ def main():
         with urllib.request.urlopen(request, timeout=30) as response:
             if response.status != 200 or response.read().strip() != b"ok":
                 raise ValueError("Slack rejected notification")
-    except (ValueError, urllib.error.URLError, TimeoutError):
+    except (ValueError, OSError, http.client.HTTPException):
         # Do not log exceptions: a request error could include the secret webhook URL.
         print("::error::Slack notification failed. The deployment remains pending; use the Actions summary for the approval handoff.")
         return 1
