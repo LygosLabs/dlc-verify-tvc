@@ -95,7 +95,9 @@ Build the image with `make out/mint-attester/index.json`. CI publishes it as `gh
 | `dev` | staging | mutinynet (signet) | `app.mint-attester.staging.json` | `release.mint-attester.staging.json` | hosted operators, automatic |
 | `master` | production | mainnet | `app.mint-attester.mainnet.json` | `release.mint-attester.mainnet.json` | two YubiKey operators, by hand |
 
-Staging on Mutinynet is the one test enclave. It pins a Fordefi funding key like mainnet, and differs only in its network, `--allow-insecure-network` and `--min-confirmations 1` (mainnet 6). There is no testnet4 attester. The earlier `mint-attester-testnet4` app (`d75cce18-74a1-44e0-9aac-c4b5f9dc5208`) still runs an old build until it is removed with `tvc app delete --app-id d75cce18-74a1-44e0-9aac-c4b5f9dc5208`, which deletes its deployments too.
+Staging on Mutinynet is the one test enclave. It pins a Fordefi funding key like mainnet, and differs only in its network, `--allow-insecure-network` and `--min-confirmations 1` (mainnet 6). There is no testnet4 attester; the old `mint-attester-testnet4` app was deleted on 2026-11-05.
+
+Every deployment runs one replica on the smallest TVC instance, 2 CPUs and 1 GiB (`replicas`, `instanceSizeCpus`, `instanceSizeRam` in the deploy config); the attester is idle almost all the time. One replica means no failover: a replacement enclave needs its quorum-key shares provisioned again, which the hosted operators do on staging and two YubiKey operators must do by hand on mainnet, so mainnet attests nothing until they do.
 
 Each environment is one TVC app, created once. The app owns the quorum key, so a new deployment under the same app signs with the same key and the `Verifier` contract pinned to it never changes. The 24-hour timelock in `lygos-contracts` applies only when a key changes, which means a new app and a new `Verifier`. Enclave code on mainnet is governed by the app's 2-of-3 manifest set instead: whoever holds two operator keys can ship code that signs with the mainnet key, so those keys stay on YubiKeys held by separate people and every mainnet release is announced with its image digest.
 
@@ -104,7 +106,7 @@ Each environment is one TVC app, created once. The app owns the quorum key, so a
 `.github/workflows/stagex.yml` builds the reproducible image, pushes it to GHCR, then runs `scripts/tvc-release.sh` for each environment of the branch:
 
 1. `tvc deploy create` from the environment's deploy config, with the image and executable digests overridden by the ones just built. The config file is a template and is not committed back.
-2. On `dev`: the two hosted operators in the release config approve the manifest and provision their shares, the deployment is set live once all three replicas are ready, `/health` is checked and the previous deployment is re-targeted if it fails, otherwise the previous deployment is deleted (restorable with `tvc deploy restore`).
+2. On `dev`: the two hosted operators in the release config approve the manifest and provision their shares, the deployment is set live once all its replicas are ready, `/health` is checked and the previous deployment is re-targeted if it fails, otherwise the previous deployment is deleted (restorable with `tvc deploy restore`).
 3. On `master`: stop after step 1. The job summary prints the deployment and manifest ids. Two operators then run `tvc deploy approve --deploy-id <id> --serial <yubikey serial>`, provision, and one runs `tvc app set-live-deploy`.
 
 CI authenticates with `TVC_ORG_ID`, `TVC_API_KEY_PUBLIC`, and `TVC_API_KEY_PRIVATE` from the GitHub environment of the same name. The release script turns them into a normal `tvc` login using `tvc-configs/tvc.config.ci.toml`, which lists the hosted operators; env-var auth on its own cannot approve or provision as a hosted operator. The production key only needs permission to create deployments.
