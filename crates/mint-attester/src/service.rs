@@ -143,17 +143,17 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
             ));
         }
     }
-    let announcement = offer_announcement(&request.offer).map_err(|error| error.to_string())?;
-    if announcement.outcomes.len() > MAX_OUTCOMES {
-        return Err(format!("more than {MAX_OUTCOMES} outcomes"));
-    }
     let funding =
         funding_summary(&request.offer, &request.accept).map_err(|error| error.to_string())?;
+    if funding.accepter_funding_pubkey != config.lygos_funding_pubkey.serialize() {
+        return Err(NOT_PINNED.to_owned());
+    }
     if funding.inputs > MAX_FUNDING_INPUTS {
         return Err(format!("more than {MAX_FUNDING_INPUTS} funding inputs"));
     }
-    if funding.accepter_funding_pubkey != config.lygos_funding_pubkey.serialize() {
-        return Err(NOT_PINNED.to_owned());
+    let announcement = offer_announcement(&request.offer).map_err(|error| error.to_string())?;
+    if announcement.outcomes.len() > MAX_OUTCOMES {
+        return Err(format!("more than {MAX_OUTCOMES} outcomes"));
     }
     // The announcement's signature is checked under its own key here; which key may sign it
     // depends on the market, so `receipt_for` pins the key.
@@ -990,7 +990,10 @@ mod tests {
     /// DLC needs, is refused before any reconstruction.
     #[test]
     fn refuses_an_unpinned_or_oversized_dlc_before_reconstruction() {
-        let (_, request) = fixture_request();
+        // An unparseable tx would be refused right after reconstruction, so this error shows the
+        // pin was checked before it.
+        let mut request = fixture_request().1;
+        request.tx = "zz".to_owned();
         let error = attest(&config(), &request).expect_err("the fixture's accepter is not LYGOS");
         assert_eq!(error, NOT_PINNED);
 
