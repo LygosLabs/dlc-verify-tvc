@@ -1,0 +1,32 @@
+name: Open production release PR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: production-release-pr
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    name: Open dev to master PR
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Open or reuse release PR
+        env:
+          # RELEASE_PR_TOKEN is optional on purpose. Unset, the job's own token (contents read,
+          # pull requests write) opens the PR and its CI waits for a write user's approval; set,
+          # a GitHub App token or PAT lets that CI start without the prompt.
+          GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN || github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash .github/scripts/open-production-release-pr.sh

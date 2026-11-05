@@ -106,9 +106,20 @@ summary() {
 if [ "${auto_live}" != "true" ]; then
   echo "approve with two manifest-set operators, provision, then set live:"
   echo "  tvc deploy approve --deploy-id ${deploy_id} --serial <yubikey serial>"
-  echo "  tvc deploy provision --deploy-id ${deploy_id} --operator-id <operator>"
+  echo "  tvc deploy provisioning-details --deploy-id ${deploy_id} --provision-bundle-out provision-bundle.json"
+  echo "  tvc keys re-encrypt-local-share --quorum-key-metadata <metadata.json> --provision-bundle provision-bundle.json --serial <yubikey serial> --re-encrypted-out re-encrypted-share.json"
+  echo "  tvc deploy post-share --re-encrypted-share re-encrypted-share.json --share-operator-id <share-set operator>"
   echo "  tvc app set-live-deploy --deploy-id ${deploy_id}"
   summary "created, awaiting operator approval"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    {
+      echo "deployment_id=${deploy_id}"
+      echo "app_id=${app_id}"
+      echo "manifest_id=${manifest_id}"
+      echo "image=${image}"
+      echo "executable_digest=${exec_digest}"
+    } >>"${GITHUB_OUTPUT}"
+  fi
   exit 0
 fi
 

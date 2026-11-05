@@ -292,7 +292,18 @@ jobs:
           name: mint-attester-tvc-${{ github.sha }}
           path: tvc-output
       - name: Create deployment
+        id: candidate
         run: |
           scripts/tvc-release.sh mainnet \
             "$(jq -r .containerImage tvc-output/mint-attester.json)" \
             "$(jq -r .executableSha256 tvc-output/mint-attester.json)"
+      - name: Notify Slack of pending production approval
+        if: steps.candidate.outputs.deployment_id != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_PRODUCTION_RELEASE_WEBHOOK_URL }}
+          TVC_DEPLOYMENT_ID: ${{ steps.candidate.outputs.deployment_id }}
+          TVC_APP_ID: ${{ steps.candidate.outputs.app_id }}
+          TVC_MANIFEST_ID: ${{ steps.candidate.outputs.manifest_id }}
+          TVC_IMAGE: ${{ steps.candidate.outputs.image }}
+          TVC_EXECUTABLE_DIGEST: ${{ steps.candidate.outputs.executable_digest }}
+        run: python3 .github/scripts/notify-production-release.py
