@@ -119,6 +119,12 @@ The workflow must first be merged into the repository's default branch to appear
 
 After merging, `stagex` uses the GitHub `production` environment to create the pending mainnet deployment. Two YubiKey operators approve and provision it manually. See the [production setup and release runbook](https://github.com/LygosLabs/morpho-midnight-planning/blob/master/docs/production-tvc-yubikey-setup.md) for the release steps, key-share commands and rollback procedure. Documentation-only changes can skip `stagex` because of its path filter; run that workflow manually on `master` when a deployment is needed.
 
+### Production approval notifications
+
+After a mainnet candidate is created, `stagex` posts a Slack message with the commit/Actions links, App/deployment/manifest IDs, image and executable digests, the YubiKey approval command, and the release runbook. It says **awaiting 2-of-3 approval (not live)**. There is no notification when placeholder configuration skips deployment, and the staging flow does not use this webhook.
+
+Recommended channel: `#turnkey-deploys`, alongside `#oracle-deploys`. Create a Slack incoming webhook for the chosen release channel and save its URL as `SLACK_PRODUCTION_RELEASE_WEBHOOK_URL` in the GitHub **production environment**. The webhook controls the channel; do not commit its URL. If the secret is missing or Slack rejects the request, the notification step fails visibly after candidate creation. The candidate remains pending and its details remain in the Actions summary; a notification failure does not roll back or approve anything. Rerunning the entire deployment job may create another candidate, so use the existing deployment details for a manual handoff instead of blindly rerunning it.
+
 ### Creating an environment
 
 Once per environment, from `tvc-configs/*.mint-attester.example.json`. For mainnet, each operator first sets up a YubiKey with [OPERATOR_YUBIKEY.md](OPERATOR_YUBIKEY.md).
