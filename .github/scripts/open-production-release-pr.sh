@@ -4,7 +4,8 @@ set -euo pipefail
 : "${GH_REPO:?set GH_REPO to owner/repository}"
 : "${GH_TOKEN:?set GH_TOKEN}"
 
-existing=$(gh pr list --repo "${GH_REPO}" --base master --head dev --state open --json url --jq '.[0].url // empty')
+# Only this repository's dev branch: a fork's branch named dev must not pass for the release PR.
+existing=$(gh api "repos/${GH_REPO}/pulls?base=master&head=${GH_REPO%%/*}:dev&state=open" --jq '.[0].html_url // empty')
 if [ -n "${existing}" ]; then
   echo "Existing release PR: ${existing}"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
