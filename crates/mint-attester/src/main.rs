@@ -27,7 +27,7 @@ struct Cli {
     /// default, so a mainnet enclave names its network and cannot skip the funding key pin.
     #[arg(long, value_parser = parse_network)]
     network: bitcoin::Network,
-    /// The Midnight authorizer's EVM address, which signs every Midnight DLC's terms.
+    /// The Midnight authorizer's EVM address, which signs every Midnight DLC's offer and accept.
     #[arg(long, value_parser = parse_address)]
     lygos_authorizer: [u8; 20],
     /// The Lygos Midnight funding key every DLC's accepter must use, compressed hex. Required on
