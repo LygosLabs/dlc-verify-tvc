@@ -44,8 +44,13 @@ def build_payload(env):
 
 def main():
     webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
-    parsed = urllib.parse.urlparse(webhook)
-    if parsed.scheme != "https" or parsed.hostname not in ("hooks.slack.com", "hooks.slack-gov.com"):
+    try:
+        parsed = urllib.parse.urlparse(webhook)
+        host = parsed.hostname
+    except ValueError:
+        # Parse errors can quote the URL, which is secret; treat it as unconfigured.
+        parsed, host = None, None
+    if parsed is None or parsed.scheme != "https" or host not in ("hooks.slack.com", "hooks.slack-gov.com"):
         print("::error::Configure SLACK_PRODUCTION_RELEASE_WEBHOOK_URL in the production GitHub environment. The deployment remains pending; see the Actions summary.")
         return 1
     try:
