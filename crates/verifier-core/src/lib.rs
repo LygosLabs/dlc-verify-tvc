@@ -438,16 +438,28 @@ pub fn offer_announcement(offer_hex: &str) -> Result<OfferAnnouncement, VerifyEr
     })
 }
 
-/// How many funding inputs an offer and its accept spend together, from a parse alone, so a
-/// caller can cap them before verification.
+/// What an offer and its accept say about funding, read from a parse alone, so a caller can
+/// refuse a request before any signature work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FundingSummary {
+    /// Funding inputs the offer and accept spend together.
+    pub inputs: usize,
+    /// The accepter's funding key, compressed.
+    pub accepter_funding_pubkey: [u8; 33],
+}
+
+/// Read an offer's and accept's funding inputs and the accepter's funding key.
 ///
 /// # Errors
 ///
 /// Fails when either message does not parse.
-pub fn funding_input_count(offer_hex: &str, accept_hex: &str) -> Result<usize, VerifyError> {
+pub fn funding_summary(offer_hex: &str, accept_hex: &str) -> Result<FundingSummary, VerifyError> {
     let offer: OfferDlc = strict_read("offer", &decode_hex("offer", offer_hex)?)?;
     let accept: AcceptDlc = strict_read("accept", &decode_hex("accept", accept_hex)?)?;
-    Ok(offer.funding_inputs.len() + accept.funding_inputs.len())
+    Ok(FundingSummary {
+        inputs: offer.funding_inputs.len() + accept.funding_inputs.len(),
+        accepter_funding_pubkey: accept.funding_pubkey.serialize(),
+    })
 }
 
 /// Reproduce the PR #9 DLC Verify result with DDK-native Rust verification.
