@@ -1695,6 +1695,25 @@ mod tests {
             Some("testnet"),
         );
         assert_eq!(result.adaptor_valid, Some(false));
+
+        // The mint attester's only proof that Lygos agreed to a DLC: an accept naming the pinned
+        // key passes only with that key's own signatures. The same signatures under any other key
+        // the accept names fail, so naming a public key is not enough.
+        let other_key = SecretKey::from_slice(&[0x43; 32]).map_err(|error| error.to_string())?;
+        accept.funding_pubkey = PublicKey::from_secret_key(&secp, &other_key);
+        let result = crate::verify_dlc_compatibility(
+            &hex::encode(offer.encode()),
+            &hex::encode(accept.encode()),
+            None,
+            None,
+            Some("testnet"),
+        );
+        assert_eq!(result.adaptor_valid, Some(false));
+        assert_eq!(result.refund_sig_valid, Some(false));
+        assert_ne!(
+            result.verification_status,
+            verifier_schema::VerificationStatus::Pass
+        );
         Ok(())
     }
 
