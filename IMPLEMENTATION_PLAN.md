@@ -122,7 +122,7 @@ release                   Machine-readable release identity manifests
 - Publish a release manifest containing source commit, `Cargo.lock` digest, OCI digest, executable digest, QOS version/PCR set, TVC IDs, path/args/ports, debug/egress state, and manifest operator policy.
 - Generate fresh TVC configuration with the installed CLI and query the live QOS-version API at deployment time. `0.12.1` is current, but it must not be assumed permanent.
 - Use separate development and production TVC applications. Production requires debug disabled, egress disabled, and a 2-of-3 Lygos-controlled manifest set.
-- Deployment gate: 3/3 healthy replicas, valid/invalid/malformed/oversize/concurrency canaries, a verified real App Proof and exact-key Boot Proof, and independent release-policy validation before `set-live-deploy`.
+- Deployment gate: all configured replicas healthy (1/1), valid/invalid/malformed/oversize/concurrency canaries, a verified real App Proof and exact-key Boot Proof, and independent release-policy validation before `set-live-deploy`.
 
 ## Milestones and acceptance gates
 
