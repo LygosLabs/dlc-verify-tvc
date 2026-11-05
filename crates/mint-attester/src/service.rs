@@ -1,7 +1,6 @@
 //! The attest endpoint: DLC transcript, Midnight policy, lock proof, signed receipt.
 
 use crate::{
-    authorizer,
     midnight::{self, OracleKeys, REFUND_GAP_SECS, RequestId, Terms},
     receipt::{Domain, Receipt, sign_digest},
     spv::{Lock, LockProof, verify_lock},
@@ -20,13 +19,13 @@ use bitcoin::{
     secp256k1::PublicKey,
 };
 use p256::ecdsa::SigningKey;
-use serde::Deserialize;
+use serde::{Deserialize, de::IgnoredAny};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 use tower_http::timeout::TimeoutLayer;
 use verifier_core::{
-    OfferAnnouncement, funding_input_count, offer_announcement, verify_dlc_compatibility,
+    OfferAnnouncement, funding_summary, offer_announcement, verify_dlc_compatibility,
 };
 use verifier_schema::{DlcVerifyResult, VerificationStatus};
 
@@ -35,14 +34,11 @@ use verifier_schema::{DlcVerifyResult, VerificationStatus};
 pub struct Config {
     /// Bitcoin network the locks are on.
     pub network: Network,
-    /// The Midnight authorizer's EVM address: every DLC's offer and accept must carry its
-    /// signature.
-    pub lygos_authorizer: [u8; 20],
-    /// The Lygos Midnight funding key: every DLC's accepter must be this key. A Fordefi lender
-    /// co-signs every DLC from one vault key, so production pins it. Staging co-signs with dlcd-rs,
-    /// which derives a key per contract, so it runs without a pin. The binary will not start on
-    /// mainnet without one.
-    pub lygos_funding_pubkey: Option<PublicKey>,
+    /// The Lygos funding key: the Fordefi vault key Lygos co-signs every Midnight DLC with, one
+    /// per environment. Every DLC's accepter must be this key. The transcript check verifies the
+    /// accepter's CET adaptor and refund signatures under it, so a DLC passes only if the vault
+    /// signed its exact CETs and refund; that is Lygos's approval of the DLC.
+    pub lygos_funding_pubkey: PublicKey,
     /// The Midnight oracle's keys, one per calendar quarter. An announcement must be signed by
     /// the key of its market's maturity quarter.
     pub oracle_keys: OracleKeys,
@@ -90,10 +86,10 @@ pub struct AttestRequest {
     pub request_id: String,
     /// `Verifier` address the receipt is signed for.
     pub verifier: String,
-    /// The Midnight authorizer's EIP-712 signature over this DLC's offer and accept, `r ‖ s ‖ v`.
-    /// Optional in the body so a client that omits it is told why, not that a field is missing.
+    /// Ignored. The retired Midnight authorizer's signature, still accepted in the body so a
+    /// client that sends it keeps working until it stops.
     #[serde(default)]
-    pub authorization: String,
+    pub authorization: Option<IgnoredAny>,
 }
 
 /// The request's EVM-side terms, decoded.
@@ -121,10 +117,6 @@ pub struct LoanTerms {
 ///
 /// Returns why the request was refused.
 pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String> {
-    if request.authorization.is_empty() {
-        return Err("the request carries no Midnight authorization".to_owned());
-    }
-    let authorization = fixed("authorization", &request.authorization)?;
     let terms = LoanTerms {
         market: bytes("market", &request.market)?,
         chain_id: request.chain_id,
@@ -136,32 +128,32 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
     };
     let verifier = fixed("verifier", &request.verifier)?;
 
-    // Lygos's approval before any DLC work: it costs two hashes and one key recovery, so a request
-    // Lygos did not approve is refused before it can hold a slot for long.
-    let offer = message("offer", &request.offer)?;
-    let accept = message("accept", &request.accept)?;
-    message("sign", &request.sign)?;
-    let approval = authorizer::digest(
-        terms.chain_id,
-        &terms.originator,
-        &authorizer::message_hash(&offer),
-        &authorizer::message_hash(&accept),
-    );
-    if authorizer::signer(&approval, &authorization)? != config.lygos_authorizer {
-        return Err("the Midnight authorizer did not sign this offer and accept".to_owned());
-    }
-
-    // Then the cheap parses: reconstruction allocates per outcome and hashes the funding
+    // The cheap checks first. Reconstruction allocates per outcome and hashes the funding
     // transaction per input, and a Midnight DLC has a handful of each, so an oversized one is
-    // refused before any signature work.
+    // refused before any signature work. So is a DLC whose Lygos side is not the pinned key; the
+    // key is public, so this only saves work, and the signatures under it are checked below.
+    for (field, message) in [
+        ("offer", &request.offer),
+        ("accept", &request.accept),
+        ("sign", &request.sign),
+    ] {
+        if message.strip_prefix("0x").unwrap_or(message).len() > 2 * MAX_MESSAGE_BYTES {
+            return Err(format!(
+                "the {field} is larger than {MAX_MESSAGE_BYTES} bytes"
+            ));
+        }
+    }
     let announcement = offer_announcement(&request.offer).map_err(|error| error.to_string())?;
     if announcement.outcomes.len() > MAX_OUTCOMES {
         return Err(format!("more than {MAX_OUTCOMES} outcomes"));
     }
-    let inputs =
-        funding_input_count(&request.offer, &request.accept).map_err(|error| error.to_string())?;
-    if inputs > MAX_FUNDING_INPUTS {
+    let funding =
+        funding_summary(&request.offer, &request.accept).map_err(|error| error.to_string())?;
+    if funding.inputs > MAX_FUNDING_INPUTS {
         return Err(format!("more than {MAX_FUNDING_INPUTS} funding inputs"));
+    }
+    if funding.accepter_funding_pubkey != config.lygos_funding_pubkey.serialize() {
+        return Err(NOT_PINNED.to_owned());
     }
     // The announcement's signature is checked under its own key here; which key may sign it
     // depends on the market, so `receipt_for` pins the key.
@@ -233,9 +225,7 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
     }))
 }
 
-/// Apply the Midnight policy to a verified transcript and a proven lock. Lygos's approval of the
-/// offer and accept is `attest`'s first check, so it is not repeated here: those bytes fix which
-/// side holds which funding key, so `dlc` must come from an approved offer and accept.
+/// Apply the Midnight policy to a verified transcript and a proven lock.
 ///
 /// # Errors
 ///
@@ -270,11 +260,11 @@ pub fn receipt_for(
         ));
     }
 
-    // The accepter is Lygos. Where a funding key is pinned it must be that key, so a stolen
-    // authorizer cannot approve a DLC whose Lygos side its holder controls. The approval `attest`
-    // checked over the offer and accept is what shows Lygos agreed to these terms. The refund is
-    // the trusted last resort and must pay the Lygos side: the whole funding output to the
-    // accepter.
+    // The accepter is Lygos, and its key must be the pinned Fordefi key. The transcript passed
+    // only if the accepter's CET adaptor and refund signatures verify under that key, so the vault
+    // signed these exact CETs and refund, which spend this funding output: that is Lygos agreeing
+    // to this DLC. The refund is the trusted last resort and must pay the Lygos side: the whole
+    // funding output to the accepter.
     let offerer = dlc.offerer_funding_pubkey.as_deref().unwrap_or_default();
     let lygos = dlc.accepter_funding_pubkey.as_deref().unwrap_or_default();
     if lygos.is_empty() || offerer == lygos {
@@ -334,7 +324,7 @@ pub fn receipt_for(
     // split is checked here: Lygos stakes nothing, the borrower takes the whole collateral unless
     // the loan is liquidated, and the Lygos side takes it all when it is. That side's output may
     // pay the liquidator's script instead (a payout script override); the liquidator checks its
-    // own CET, and the authorizer signed the offer and accept that fix every CET.
+    // own CET, and the Lygos key's adaptor signatures cover every CET.
     if dlc.accept_collateral.as_deref() != Some("0") {
         return Err("Lygos must stake no collateral".to_owned());
     }
@@ -423,17 +413,13 @@ pub fn receipt_for(
     })
 }
 
-/// Where a Lygos funding key is pinned, the accepter's key must be it. Mainnet always pins one:
-/// `--lygos-funding-pubkey` is required with `--network mainnet`.
+/// The accepter's key must be the pinned Lygos key.
 fn check_lygos_key(config: &Config, lygos: &str) -> Result<(), String> {
-    let Some(pinned) = config.lygos_funding_pubkey else {
-        return Ok(());
-    };
     let lygos: PublicKey = lygos
         .parse()
         .map_err(|_| "the DLC's Lygos funding key is not a public key".to_owned())?;
-    if lygos != pinned {
-        return Err("the DLC's Lygos funding key is not the pinned Midnight key".to_owned());
+    if lygos != config.lygos_funding_pubkey {
+        return Err(NOT_PINNED.to_owned());
     }
     Ok(())
 }
@@ -455,19 +441,6 @@ pub fn parse_network(name: &str) -> Result<Network, String> {
     }
 }
 
-/// Parse the `--lygos-authorizer` launch argument: a 20-byte EVM address, `0x` optional.
-///
-/// # Errors
-///
-/// Fails for anything else, or the zero address, which no key signs for.
-pub fn parse_address(value: &str) -> Result<[u8; 20], String> {
-    let address: [u8; 20] = fixed("address", value)?;
-    if address == [0; 20] {
-        return Err("the zero address cannot authorize".to_owned());
-    }
-    Ok(address)
-}
-
 /// `verifier-core` uses the network only to render addresses, so every test network is "testnet".
 fn network_name(network: Network) -> &'static str {
     match network {
@@ -480,16 +453,6 @@ fn network_name(network: Network) -> &'static str {
 fn bytes(field: &str, value: &str) -> Result<Vec<u8>, String> {
     hex::decode(value.strip_prefix("0x").unwrap_or(value))
         .map_err(|error| format!("invalid {field}: {error}"))
-}
-
-/// A DLC message's bytes, refused unread when it is larger than a Midnight DLC needs.
-fn message(field: &str, value: &str) -> Result<Vec<u8>, String> {
-    if value.strip_prefix("0x").unwrap_or(value).len() > 2 * MAX_MESSAGE_BYTES {
-        return Err(format!(
-            "the {field} is larger than {MAX_MESSAGE_BYTES} bytes"
-        ));
-    }
-    bytes(field, value)
 }
 
 fn fixed<const N: usize>(field: &str, value: &str) -> Result<[u8; N], String> {
@@ -509,6 +472,7 @@ const MAX_FUNDING_INPUTS: usize = 64;
 /// The largest DLC message: an accept or sign carries one adaptor signature per outcome (about
 /// 17 KiB at 102), and an offer the borrower's coins with their previous transactions.
 const MAX_MESSAGE_BYTES: usize = 256 * 1024;
+const NOT_PINNED: &str = "the DLC's Lygos funding key is not the pinned Midnight key";
 /// How long a request may take to deliver its body once it holds a slot.
 const BODY_READ_LIMIT: Duration = Duration::from_secs(5);
 
@@ -583,20 +547,11 @@ mod tests {
     const MARKET: &str = "0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000210500000000000000000000000000000000000000000000000000000000000000a100000000000000000000000000000000000000000000000000000000000000b20000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000006b2db200000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000c30000000000000000000000000000000000000000000000000bef55718ad6000000000000000000000000000000000000000000000000000003782dace9d9000000000000000000000000000000000000000000000000000000000000000000d4";
     const MATURITY: u32 = 1_798_156_800;
     const BLOCK_TIME: u32 = 1_790_000_000;
-    /// The authorizer's secret key in these tests.
-    const AUTHORIZER_SECRET: [u8; 32] = [5; 32];
-
-    /// The authorizer's address, recovered from a signature it made.
-    fn authorizer_address() -> [u8; 20] {
-        authorizer::signer(&[1; 32], &authorizer::sign(&[1; 32], &AUTHORIZER_SECRET))
-            .expect("address")
-    }
 
     fn config() -> Config {
         Config {
             network: Network::Bitcoin,
-            lygos_authorizer: authorizer_address(),
-            lygos_funding_pubkey: Some(LYGOS.parse().expect("key")),
+            lygos_funding_pubkey: LYGOS.parse().expect("key"),
             oracle_keys: format!(
                 "midnight-2026Q4-test-v1:{ORACLE},midnight-2027Q1-test-v1:{NEXT_ORACLE}"
             )
@@ -644,20 +599,6 @@ mod tests {
             refund_txid: &[7; 32],
         }
         .hash()
-    }
-
-    /// `request` signed by `secret` as the authorizer signs: its offer and accept, in its chain
-    /// and Originator's domain.
-    fn signed(mut request: AttestRequest, secret: &[u8; 32]) -> AttestRequest {
-        let hash = |message: &str| authorizer::message_hash(&hex::decode(message).expect("hex"));
-        let digest = authorizer::digest(
-            request.chain_id,
-            &fixed("originator", &request.originator).expect("originator"),
-            &hash(&request.offer),
-            &hash(&request.accept),
-        );
-        request.authorization = format!("0x{}", hex::encode(authorizer::sign(&digest, secret)));
-        request
     }
 
     fn lock() -> Lock {
@@ -869,18 +810,6 @@ mod tests {
         assert!(refused(|d, _, _| d.cet_locktime = Some(900_000)).contains("CET locktime"));
     }
 
-    /// `termsHash` names the refund: a DLC with another refund carries other terms. That DLC is
-    /// another accept, which the authorizer did not approve.
-    #[test]
-    fn terms_hash_names_the_refund() {
-        let terms = terms();
-        let mut dlc = dlc();
-        dlc.refund_tx_id = Some(Txid::from_byte_array([8; 32]).to_string());
-        let receipt =
-            receipt_for(&config(), &dlc, &announcement(&terms), &lock(), &terms).expect("receipt");
-        assert_ne!(receipt.terms_hash, terms_hash(&terms));
-    }
-
     #[test]
     fn refuses_a_forged_announced_at() {
         let mut terms = terms();
@@ -924,23 +853,12 @@ mod tests {
     fn refuses_a_lygos_key_other_than_the_pinned_one() {
         let terms = terms();
         let pinned = Config {
-            lygos_funding_pubkey: Some(BORROWER.parse().expect("key")),
+            lygos_funding_pubkey: BORROWER.parse().expect("key"),
             ..config()
         };
         let error = receipt_for(&pinned, &dlc(), &announcement(&terms), &lock(), &terms)
             .expect_err("the accepter is not the pinned key");
         assert!(error.contains("pinned Midnight key"), "{error}");
-    }
-
-    #[test]
-    fn staging_runs_without_a_pinned_lygos_key() {
-        let staging = Config {
-            network: Network::Signet,
-            lygos_funding_pubkey: None,
-            ..config()
-        };
-        assert_eq!(check_lygos_key(&staging, LYGOS), Ok(()));
-        assert_eq!(check_lygos_key(&staging, BORROWER), Ok(()));
     }
 
     #[test]
@@ -991,9 +909,11 @@ mod tests {
         config.lygos_funding_pubkey = dlc
             .accepter_funding_pubkey
             .as_deref()
-            .map(|key| key.parse().expect("key"));
-        // Even with its own key pinned, it does not refund to the accepter, so no authorization
-        // would make it a Midnight DLC.
+            .expect("accepter key")
+            .parse()
+            .expect("key");
+        // Even with its own key pinned, it does not refund to the accepter, so it is not a
+        // Midnight DLC.
         assert!(
             attempt(&config).contains("refund to the accepter"),
             "{}",
@@ -1002,7 +922,7 @@ mod tests {
     }
 
     /// The real testnet transcript with the real mainnet lock proof in explorer byte order, and
-    /// a config pinning the transcript's oracle.
+    /// a config pinning the transcript's oracle and its accepter's funding key.
     fn fixture_request() -> (Config, AttestRequest) {
         use crate::spv::fixture::{BRANCH, HEADERS, TX, TX_INDEX};
         let fixture: Value = serde_json::from_str(include_str!(
@@ -1010,7 +930,13 @@ mod tests {
         ))
         .expect("fixture");
         let field = |name: &str| fixture[name].as_str().expect("field").to_owned();
-        let config = config();
+        let accepter = funding_summary(&field("offer"), &field("accept"))
+            .expect("funding")
+            .accepter_funding_pubkey;
+        let config = Config {
+            lygos_funding_pubkey: PublicKey::from_slice(&accepter).expect("key"),
+            ..config()
+        };
         let hex0x = |bytes: &[u8]| format!("0x{}", hex::encode(bytes));
         let request = AttestRequest {
             offer: field("offer"),
@@ -1028,104 +954,9 @@ mod tests {
             announced_at: 1_789_000_000,
             request_id: REQUEST_ID.to_owned(),
             verifier: hex0x(&[0x11; 20]),
-            authorization: String::new(),
+            authorization: None,
         };
-        (config, signed(request, &AUTHORIZER_SECRET))
-    }
-
-    /// The fixture request with its offer edited, approved again.
-    fn with_offer(edit: impl FnOnce(&mut ddk_messages::OfferDlc)) -> AttestRequest {
-        use lightning::util::ser::{Readable, Writeable};
-        let request = fixture_request().1;
-        let bytes = hex::decode(&request.offer).expect("hex");
-        let mut offer: ddk_messages::OfferDlc =
-            Readable::read(&mut std::io::Cursor::new(bytes)).expect("offer");
-        edit(&mut offer);
-        let offer = hex::encode(offer.encode());
-        signed(AttestRequest { offer, ..request }, &AUTHORIZER_SECRET)
-    }
-
-    /// Lygos's approval is the first check: a request it did not approve is refused before its
-    /// DLC is parsed, and an approval names one offer and one accept in one chain's domain.
-    #[test]
-    fn needs_the_authorizer_to_sign_this_offer_and_accept() {
-        let config = fixture_request().0;
-        let attempt = |request: &AttestRequest| attest(&config, request).expect_err("refused");
-        let request = || fixture_request().1;
-        // Approved, so it reaches the policy.
-        assert!(attempt(&request()).contains("another Bitcoin network"));
-
-        let stranger = signed(request(), &[6; 32]);
-        assert!(attempt(&stranger).contains("did not sign"));
-        let mut elsewhere = signed(
-            AttestRequest {
-                chain_id: 1,
-                ..request()
-            },
-            &AUTHORIZER_SECRET,
-        );
-        elsewhere.chain_id = 8453;
-        assert!(attempt(&elsewhere).contains("did not sign"));
-        // The hashes are two fields, in order: an approval of the messages swapped is another.
-        let swapped = signed(
-            AttestRequest {
-                offer: request().accept,
-                accept: request().offer,
-                ..request()
-            },
-            &AUTHORIZER_SECRET,
-        );
-        let mut reordered = request();
-        reordered.authorization = swapped.authorization;
-        assert!(attempt(&reordered).contains("did not sign"));
-        // The approval fixes the sides: an offer funded from Lygos's key is not the one approved.
-        let lygos_offers = with_offer(|offer| {
-            use lightning::util::ser::Readable;
-            let accept = hex::decode(&request().accept).expect("hex");
-            let accept: ddk_messages::AcceptDlc =
-                Readable::read(&mut std::io::Cursor::new(accept)).expect("accept");
-            offer.funding_pubkey = accept.funding_pubkey;
-        });
-        let mut swapped_sides = request();
-        swapped_sides.offer = lygos_offers.offer;
-        assert!(attempt(&swapped_sides).contains("did not sign"));
-        // Another accept, even one that does not parse, is refused at the approval.
-        let mut other_accept = request();
-        other_accept.accept = "00".to_owned();
-        assert!(attempt(&other_accept).contains("did not sign"));
-
-        let mut garbage = request();
-        garbage.authorization = format!("0x{}", "00".repeat(65));
-        assert!(attempt(&garbage).contains("invalid authorization"));
-        // A message larger than a Midnight DLC needs is refused unread.
-        let mut oversized = request();
-        oversized.offer = "00".repeat(MAX_MESSAGE_BYTES + 1);
-        assert_eq!(
-            attempt(&oversized),
-            format!("the offer is larger than {MAX_MESSAGE_BYTES} bytes")
-        );
-    }
-
-    /// More funding inputs than a Midnight DLC needs are refused before any signature work.
-    #[test]
-    fn caps_the_funding_inputs() {
-        let config = fixture_request().0;
-        let with_inputs = |count: usize| {
-            with_offer(|offer| {
-                let input = offer.funding_inputs[0].clone();
-                offer.funding_inputs = vec![input; count];
-            })
-        };
-        let unfunded = with_inputs(0);
-        let accept_inputs = funding_input_count(&unfunded.offer, &unfunded.accept).expect("inputs");
-        let full = MAX_FUNDING_INPUTS - accept_inputs;
-        let error = attest(&config, &with_inputs(full)).expect_err("refused later");
-        assert!(!error.starts_with("more than"), "{error}");
-        let error = attest(&config, &with_inputs(full + 1)).expect_err("one too many");
-        assert_eq!(
-            error,
-            format!("more than {MAX_FUNDING_INPUTS} funding inputs")
-        );
+        (config, request)
     }
 
     /// `attest` end to end up to the policy: the real mainnet lock proof in explorer byte order
@@ -1153,12 +984,32 @@ mod tests {
         uppercase.request_id = REQUEST_ID.to_uppercase();
         let error = attest(&config, &uppercase).expect_err("not the canonical spelling");
         assert!(error.contains("invalid requestId"), "{error}");
+    }
 
-        let mut unauthorized = uppercase;
-        unauthorized.request_id = REQUEST_ID.to_owned();
-        unauthorized.authorization = String::new();
-        let error = attest(&config, &unauthorized).expect_err("no authorization");
-        assert!(error.contains("no Midnight authorization"), "{error}");
+    /// A DLC whose Lygos side is not the pinned key, or whose messages are larger than a Midnight
+    /// DLC needs, is refused before any reconstruction.
+    #[test]
+    fn refuses_an_unpinned_or_oversized_dlc_before_reconstruction() {
+        let (_, request) = fixture_request();
+        let error = attest(&config(), &request).expect_err("the fixture's accepter is not LYGOS");
+        assert_eq!(error, NOT_PINNED);
+
+        let (config, request) = fixture_request();
+        for field in ["offer", "accept", "sign"] {
+            let mut oversized = fixture_request().1;
+            let message = "00".repeat(MAX_MESSAGE_BYTES + 1);
+            match field {
+                "offer" => oversized.offer = message,
+                "accept" => oversized.accept = message,
+                _ => oversized.sign = message,
+            }
+            let error = attest(&config, &oversized).expect_err("oversized");
+            assert_eq!(
+                error,
+                format!("the {field} is larger than {MAX_MESSAGE_BYTES} bytes")
+            );
+        }
+        assert!(attest(&config, &request).is_err_and(|error| !error.contains("larger")));
     }
 
     /// An offer naming every liquidator the Originator can register gets past the outcome cap;
@@ -1166,26 +1017,33 @@ mod tests {
     #[test]
     fn a_full_liquidator_set_fits_under_the_outcome_cap() {
         use ddk_messages::{
+            OfferDlc,
             contract_msgs::ContractInfo,
             oracle_msgs::{EventDescriptor, OracleInfo},
         };
-        let config = fixture_request().0;
+        use lightning::util::ser::{Readable, Writeable};
+        let (config, request) = fixture_request();
         let with_outcomes = |count: usize| {
-            let request = with_offer(|offer| {
-                if let ContractInfo::SingleContractInfo(single) = &mut offer.contract_info
-                    && let OracleInfo::Single(oracle) = &mut single.contract_info.oracle_info
-                    && let EventDescriptor::EnumEvent(descriptor) =
-                        &mut oracle.oracle_announcement.oracle_event.event_descriptor
-                {
-                    descriptor.outcomes = ["not-minted".to_owned(), "released".to_owned()]
-                        .into_iter()
-                        .chain((1..count - 1).map(|i| format!("liquidated-by-0x{i:040x}")))
-                        .collect();
-                }
-            });
-            let parsed = offer_announcement(&request.offer).expect("announcement");
+            let bytes = hex::decode(&request.offer).expect("hex");
+            let mut offer: OfferDlc =
+                Readable::read(&mut std::io::Cursor::new(bytes)).expect("offer");
+            if let ContractInfo::SingleContractInfo(single) = &mut offer.contract_info
+                && let OracleInfo::Single(oracle) = &mut single.contract_info.oracle_info
+                && let EventDescriptor::EnumEvent(descriptor) =
+                    &mut oracle.oracle_announcement.oracle_event.event_descriptor
+            {
+                descriptor.outcomes = ["not-minted".to_owned(), "released".to_owned()]
+                    .into_iter()
+                    .chain((1..count - 1).map(|i| format!("liquidated-by-0x{i:040x}")))
+                    .collect();
+            }
+            let offer = hex::encode(offer.encode());
+            let parsed = offer_announcement(&offer).expect("announcement");
             assert_eq!(parsed.outcomes.len(), count);
-            request
+            AttestRequest {
+                offer,
+                ..fixture_request().1
+            }
         };
         let full = 2 + midnight::MAX_LIQUIDATORS;
         // The edited offer no longer rebuilds, so it is refused, but past the cap.
@@ -1216,14 +1074,20 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
+    /// An older client still sends the retired authorizer's signature; it is read and ignored.
     #[test]
-    fn the_authorizer_argument_is_a_nonzero_address() {
-        let address = format!("0x{}", "f3".repeat(20));
-        assert_eq!(parse_address(&address), Ok([0xf3; 20]));
-        assert_eq!(parse_address(&"f3".repeat(20)), Ok([0xf3; 20]));
-        assert!(parse_address(&format!("0x{}", "00".repeat(20))).is_err());
-        assert!(parse_address("0x1234").is_err());
-        assert!(parse_address(LYGOS).is_err());
+    fn a_request_may_still_carry_the_retired_authorization() {
+        let mut body = json!({
+            "offer": "", "accept": "", "sign": "", "tx": "", "txIndex": 0,
+            "merkleBranch": [], "headers": [], "market": "", "chainId": 1,
+            "originator": "", "controller": "", "mintDeadline": 0, "announcedAt": 0,
+            "requestId": "", "verifier": "",
+        });
+        assert!(serde_json::from_value::<AttestRequest>(body.clone()).is_ok());
+        body["authorization"] = json!(format!("0x{}", "00".repeat(65)));
+        assert!(serde_json::from_value::<AttestRequest>(body.clone()).is_ok());
+        body["lygosAuthorizer"] = json!("0x00");
+        assert!(serde_json::from_value::<AttestRequest>(body).is_err());
     }
 
     #[test]

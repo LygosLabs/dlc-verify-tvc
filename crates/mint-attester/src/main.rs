@@ -4,7 +4,7 @@ use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
 use mint_attester::{
     midnight::OracleKeys,
-    service::{Config, parse_address, parse_network, router},
+    service::{Config, parse_network, router},
 };
 use qos_p256::P256Pair;
 use std::io;
@@ -23,17 +23,13 @@ struct Cli {
     /// QOS-managed quorum key; its signing half is the `Verifier` contract's signer.
     #[arg(long, default_value = qos_core::QUORUM_FILE)]
     quorum_file: String,
-    /// Bitcoin network: mainnet, testnet, testnet4, signet (alias mutinynet), or regtest. No
-    /// default, so a mainnet enclave names its network and cannot skip the funding key pin.
+    /// Bitcoin network: mainnet, testnet, testnet4, signet (alias mutinynet), or regtest.
     #[arg(long, value_parser = parse_network)]
     network: bitcoin::Network,
-    /// The Midnight authorizer's EVM address, which signs every Midnight DLC's offer and accept.
-    #[arg(long, value_parser = parse_address)]
-    lygos_authorizer: [u8; 20],
-    /// The Lygos Midnight funding key every DLC's accepter must use, compressed hex. Required on
-    /// mainnet; staging omits it because dlcd-rs derives a funding key per contract.
-    #[arg(long, required_if_eq("network", "mainnet"))]
-    lygos_funding_pubkey: Option<PublicKey>,
+    /// The Lygos Fordefi vault's Bitcoin key, compressed hex. Every DLC's accepter must be this
+    /// key, and its CET adaptor and refund signatures are checked under it.
+    #[arg(long)]
+    lygos_funding_pubkey: PublicKey,
     /// The Midnight oracle's keys, one per calendar quarter, in orange-grove's
     /// `MIDNIGHT_ORACLE_KEYS` format: comma-separated `keyVersion:xonlyHex`, e.g.
     /// `midnight-2027Q1-mainnet-v1:<key>`.
@@ -42,8 +38,9 @@ struct Cli {
     /// Sign receipts on a network other than mainnet, whose proof of work is free to forge.
     #[arg(long, default_value_t = false)]
     allow_insecure_network: bool,
-    /// Fewest headers that must confirm the funding block before a receipt is signed.
-    #[arg(long, default_value_t = 6)]
+    /// Fewest headers after the funding block's that must confirm it before a receipt is signed.
+    /// At least 1: an unconfirmed lock is never attested.
+    #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(1..))]
     min_confirmations: u32,
 }
 
@@ -60,7 +57,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| io::Error::other(format!("failed to load quorum key: {error:?}")))?;
     let app = router(Config {
         network: cli.network,
-        lygos_authorizer: cli.lygos_authorizer,
         lygos_funding_pubkey: cli.lygos_funding_pubkey,
         oracle_keys: cli.midnight_oracle_keys,
         key: quorum_key.signing_key().clone(),
@@ -81,35 +77,49 @@ mod tests {
     use super::Cli;
     use clap::{Parser, error::ErrorKind};
 
-    const AUTHORIZER: &str = "0x1111111111111111111111111111111111111111";
     const ORACLE_KEYS: &str =
         "midnight-2026Q4-test-v1:79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     const LYGOS: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
     fn parse(extra: &[&str]) -> Result<Cli, clap::Error> {
-        let base = [
-            "mint-attester",
-            "--lygos-authorizer",
-            AUTHORIZER,
-            "--midnight-oracle-keys",
-            ORACLE_KEYS,
-        ];
+        let base = ["mint-attester", "--midnight-oracle-keys", ORACLE_KEYS];
         Cli::try_parse_from(base.iter().chain(extra))
     }
 
     #[test]
-    fn mainnet_needs_the_funding_key_and_every_launch_names_its_network() {
-        let missing = |extra: &[&str]| parse(extra).expect_err("refused").kind();
-        assert_eq!(missing(&[]), ErrorKind::MissingRequiredArgument);
+    fn every_network_needs_the_funding_key_and_names_itself() {
+        let refused = |extra: &[&str]| parse(extra).expect_err("refused").kind();
         assert_eq!(
-            missing(&["--network", "mainnet"]),
+            refused(&["--lygos-funding-pubkey", LYGOS]),
             ErrorKind::MissingRequiredArgument
         );
-        let mainnet = parse(&["--network", "mainnet", "--lygos-funding-pubkey", LYGOS])
-            .expect("mainnet with a pin");
-        assert_eq!(mainnet.network, bitcoin::Network::Bitcoin);
-        assert!(mainnet.lygos_funding_pubkey.is_some());
-        let staging = parse(&["--network", "mutinynet"]).expect("staging needs no pin");
-        assert!(staging.lygos_funding_pubkey.is_none());
+        for network in ["mainnet", "mutinynet"] {
+            assert_eq!(
+                refused(&["--network", network]),
+                ErrorKind::MissingRequiredArgument,
+                "{network}"
+            );
+            let cli = parse(&["--network", network, "--lygos-funding-pubkey", LYGOS])
+                .expect("a pinned launch");
+            assert_eq!(cli.lygos_funding_pubkey.to_string(), LYGOS);
+        }
+        assert_eq!(
+            refused(&["--network", "mainnet", "--lygos-funding-pubkey", "02ab"]),
+            ErrorKind::ValueValidation
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_lock_is_never_enough() {
+        let pinned = ["--network", "mutinynet", "--lygos-funding-pubkey", LYGOS];
+        let with = |confirmations: &str| {
+            parse(&[&pinned[..], &["--min-confirmations", confirmations]].concat())
+        };
+        assert_eq!(
+            with("0").expect_err("zero confirmations").kind(),
+            ErrorKind::ValueValidation
+        );
+        assert_eq!(with("1").expect("one").min_confirmations, 1);
+        assert_eq!(parse(&pinned).expect("default").min_confirmations, 6);
     }
 }

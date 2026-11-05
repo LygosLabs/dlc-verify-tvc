@@ -76,13 +76,11 @@ An empty `qosCommit` records the value actually committed by the current QOS man
 - `GET /health` — liveness.
 - `POST /v1/attest` — DLC transcript, lock proof, and loan terms in; signed receipt out, or `422` with the reason for refusal.
 
-Everything the attester pins is a launch argument, so the QOS manifest measures it: `--network`, `--lygos-authorizer`, `--lygos-funding-pubkey`, `--midnight-oracle-keys`, `--min-confirmations` (default 6). Any network other than mainnet is refused unless `--allow-insecure-network` is also passed, because its proof of work is free to forge. The SPV check proves that work was done on a chain containing the funding transaction, not that the chain is Bitcoin's, so `--min-confirmations` is the enclave's own floor on what a forged lock costs; the `Verifier` contract may require more, never less. Egress stays disabled; a relayer supplies the headers and Merkle proof. A Midnight DLC must refund to the accepter (contract flag `0x01`), and its two funding keys must differ; anything else is refused. The accepter is the Lygos side, below.
+Everything the attester pins is a launch argument, so the QOS manifest measures it: `--network`, `--lygos-funding-pubkey`, `--midnight-oracle-keys`, `--min-confirmations` (default 6, at least 1: an unconfirmed lock is never attested). Any network other than mainnet is refused unless `--allow-insecure-network` is also passed, because its proof of work is free to forge. The SPV check proves that work was done on a chain containing the funding transaction, not that the chain is Bitcoin's, so `--min-confirmations` is the enclave's own floor on what a forged lock costs; the `Verifier` contract may require more, never less. Egress stays disabled; a relayer supplies the headers and Merkle proof. A Midnight DLC must refund to the accepter (contract flag `0x01`), and its two funding keys must differ; anything else is refused. The accepter is the Lygos side, below.
 
-The attester pins two Lygos keys. `--lygos-funding-pubkey` is the Bitcoin key Lygos co-signs every Midnight DLC with: a Fordefi lender uses one vault key per environment, so the accepter's key must be that key. It shows Lygos's key is in the 2-of-2, not that Lygos agreed to the DLC, because the borrower funds the lock alone. Mainnet refuses to start without it. Staging omits it: it runs on Mutinynet, which Fordefi does not serve, so dlcd-rs co-signs there and derives a key per contract.
+The attester pins one Lygos key, on every network. `--lygos-funding-pubkey` is the Bitcoin key of the Fordefi vault Lygos co-signs every Midnight DLC with, one vault per environment, and the DLC's accepter key must be that key. The transcript check verifies the accepter's CET adaptor signatures and refund signature under it, and those signatures cover this DLC's funding output, every CET and the refund. So a request passes only if the vault signed this exact DLC, and that is Lygos's approval: anyone can lock Bitcoin to a public key, but only the vault can produce its signatures. The enclave compares the key before any signature work; that only saves work, since the key is public. Whoever can make the vault sign can approve a DLC, so it must sit in a Fordefi org only Lygos controls. Staging runs on Mutinynet with a Fordefi testnet vault the same way: Fordefi signs and Lygos broadcasts.
 
-`--lygos-authorizer` is an EVM address, and its signature is what shows Lygos agreed to this exact DLC. Each request carries `authorization`, its 65-byte `r ‖ s ‖ v` EIP-712 signature of `MidnightAuthorization(bytes32 offerHash, bytes32 acceptHash)` under the domain `("Lygos Midnight Authorizer", "1", chainId, originator)`, each hash the SHA-256 of the message's raw bytes, not its hex. The offer and accept fix one funding outpoint, both funding keys, the announcement, and every CET and the refund, so the approval names everything the receipt's `termsHash` does; the sign message is left out because it does not exist yet when Lygos co-signs, and the enclave verifies its funding signatures anyway. Lygos signs it when it co-signs the DLC: first locks, every roll rung, every splice. See WP §5.
-
-The approval is the enclave's first check: two hashes and one key recovery, before the DLC is parsed, so a request Lygos did not approve cannot hold one of the eight request slots through a slow verification. The checks that follow are sized to a Midnight DLC rather than to the general verifier: each message at most 256 KiB, at most 102 outcomes (`not-minted`, `released`, and lygos-contracts' 100 liquidators), and at most 64 funding inputs.
+Requests may still carry `authorization`, the signature of the retired Midnight authorizer, an EVM key that earlier releases also pinned. It is read and ignored, so a client that still sends it keeps working.
 
 The Midnight oracle signs with one key per calendar quarter. `--midnight-oracle-keys` takes the same line as orange-grove's `MIDNIGHT_ORACLE_KEYS`, so the key ceremony's output feeds both: comma-separated `keyVersion:xonlyHex` pairs, each split at its last `:`, e.g. `midnight-2026Q4-mainnet-v1:<key>,midnight-2027Q1-mainnet-v1:<key>`. Every key version must name its quarter: `midnight-YYYYQn`, then `-`, `:`, or nothing. One key per quarter. An announcement must be signed by the key pinned for its market's maturity quarter (UTC); a quarter with no key, or any other key, is refused, so one quarter's key cannot sign for another. A new quarter's key needs a new deployment.
 
@@ -97,7 +95,7 @@ Build the image with `make out/mint-attester/index.json`. CI publishes it as `gh
 | `dev` | staging | mutinynet (signet) | `app.mint-attester.staging.json` | `release.mint-attester.staging.json` | hosted operators, automatic |
 | `master` | production | mainnet | `app.mint-attester.mainnet.json` | `release.mint-attester.mainnet.json` | two YubiKey operators, by hand |
 
-Midnight is not tested on testnet4, so there is no testnet4 attester and no testnet4 authorizer. The earlier `mint-attester-testnet4` app (`d75cce18-74a1-44e0-9aac-c4b5f9dc5208`) still runs the funding-key build until it is removed with `tvc app delete --app-id d75cce18-74a1-44e0-9aac-c4b5f9dc5208`, which deletes its deployments too.
+Staging on Mutinynet is the one test enclave, with the same settings as mainnet apart from the network; there is no testnet4 attester. The earlier `mint-attester-testnet4` app (`d75cce18-74a1-44e0-9aac-c4b5f9dc5208`) still runs an old build until it is removed with `tvc app delete --app-id d75cce18-74a1-44e0-9aac-c4b5f9dc5208`, which deletes its deployments too.
 
 Each environment is one TVC app, created once. The app owns the quorum key, so a new deployment under the same app signs with the same key and the `Verifier` contract pinned to it never changes. The 24-hour timelock in `lygos-contracts` applies only when a key changes, which means a new app and a new `Verifier`. Enclave code on mainnet is governed by the app's 2-of-3 manifest set instead: whoever holds two operator keys can ship code that signs with the mainnet key, so those keys stay on YubiKeys held by separate people and every mainnet release is announced with its image digest.
 
@@ -123,7 +121,7 @@ Once per environment, from `tvc-configs/*.mint-attester.example.json`. For mainn
    tvc keys generate-local-quorum-key -c <dir>/quorum_key.json --quorum-key-metadata-out <dir>/quorum_key_metadata.json
    ```
 2. Put the quorum public key and the three operators in the app config, then `tvc app create --config-file <app config>`. With your own quorum key the config must also declare `shareSetParams` (`name`, `threshold`, `newOperators`, `existingOperatorIds`) listing the operators holding shares; a null share set selects Turnkey's shared default key and provisioning fails with "not part of the manifest share set". Apps cannot be edited afterwards and deleted app names stay reserved.
-3. Create the environment's Midnight authorizer: an EVM vault in a Lygos-only Fordefi org, never a lender's. `scripts/fordefi-authorizer.sh create "Midnight Authorizer - <env>"` prints its address, the deploy config's `--lygos-authorizer`. Once the `Originator` is deployed, `scripts/fordefi-authorizer.sh check <vault id> <chain id> <originator>` has the vault sign an authorization of no DLC and confirms the enclave's code recovers the vault's address.
+3. Take the compressed public key of the Fordefi Bitcoin vault that co-signs the environment's Midnight DLCs, in a Fordefi org only Lygos controls, never a lender's. It is the deploy config's `--lygos-funding-pubkey`.
 4. Put the app id and pinned keys in the deploy config and the operator ids in the release config. Replace every `REPLACE_WITH_` placeholder; the release script skips an environment whose deploy config still has one.
 5. Give the `Verifier` for that environment the app's quorum key, then merge to the branch, or run `scripts/tvc-release.sh <env> <image> <digest>` locally.
 
@@ -139,7 +137,7 @@ Outside TVC the binary needs no QOS: it reads the quorum key from `--quorum-file
 | Public key x (`ENCLAVE_X`, the `Verifier`'s `signerX`) | `0xeab1fb2e525b4744a49e099469697402f422646db4747e0cb2340d35c3b0b9c1` |
 | Public key y (`ENCLAVE_Y`, the `Verifier`'s `signerY`) | `0x4b839e4f3117435cdc62dd8e63c147130f8adef488482af54746e591b4c35941` |
 
-From the repository root, with `MIDNIGHT_ORACLE_KEYS` as orange-grove sets it and `LYGOS_AUTHORIZER` the EVM address of the dev Midnight authorizer, whose key signs each request's `authorization`:
+From the repository root, with `MIDNIGHT_ORACLE_KEYS` as orange-grove sets it and `LYGOS_FUNDING_PUBKEY` the compressed key the dev lender co-signs every DLC with:
 
 ```sh
 cargo run --locked -p mint-attester -- \
@@ -147,7 +145,7 @@ cargo run --locked -p mint-attester -- \
   --host 0.0.0.0 --port 3000 \
   --network regtest --allow-insecure-network --min-confirmations 1 \
   --midnight-oracle-keys "$MIDNIGHT_ORACLE_KEYS" \
-  --lygos-authorizer "$LYGOS_AUTHORIZER"
+  --lygos-funding-pubkey "$LYGOS_FUNDING_PUBKEY"
 ```
 
 Confirmations count headers after the funding block's, so with `--min-confirmations 1` the lock proof must carry the funding block's header and at least one after it: mine one block past the funding block before attesting. That is two confirmations as Bitcoin Core counts them; lygos-contracts' `MIN_CONFIRMATIONS` (default 1) counts the same way as the attester.
