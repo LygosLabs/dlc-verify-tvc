@@ -141,7 +141,7 @@ replicas() {
     | jq -r --arg id "${deploy_id}" '.deployments[] | select(.deploymentId == $id) | "\(.replicas.ready)/\(.replicas.desired)"'
 }
 
-# The deploy config pins the replica count; a config without one gets Turnkey's default of three.
+# The deploy config pins the replica count; a config without one gets Turnkey's default (three at last check).
 want=$(jq -r '.replicas // 3' "${deploy_cfg}")
 for attempt in $(seq 1 60); do
   ready=$(replicas) || ready=""
