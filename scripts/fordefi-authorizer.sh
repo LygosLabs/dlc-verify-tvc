@@ -100,7 +100,9 @@ case ${1:-} in
       echo "Fordefi refused the request: ${tx}" >&2
       exit 1
     fi
-    recover "${tx}" "${chain_id}" "${originator}"
+    # The create-and-wait reply carries the signature in another shape than the
+    # transaction record, so recover from the record, as verify does.
+    recover "$(get "/api/v1/transactions/$(jq -r '.id' <<<"${tx}")")" "${chain_id}" "${originator}"
     ;;
   verify)
     tx_id=${2:?transaction id} chain_id=${3:?chain id} originator=${4:?originator}
