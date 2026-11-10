@@ -1,7 +1,6 @@
 //! Lygos mint attester: checks a Midnight DLC and its Bitcoin lock, then signs the receipt
 //! `Verifier.sol` accepts.
 
-pub mod authorizer;
 pub mod midnight;
 pub mod receipt;
 pub mod service;
