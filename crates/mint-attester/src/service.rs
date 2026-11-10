@@ -810,6 +810,18 @@ mod tests {
         assert!(refused(|d, _, _| d.cet_locktime = Some(900_000)).contains("CET locktime"));
     }
 
+    /// `termsHash` names the refund: a DLC with another refund carries other terms, so the
+    /// Verifier's binding of the receipt to the refund holds.
+    #[test]
+    fn terms_hash_names_the_refund() {
+        let terms = terms();
+        let mut dlc = dlc();
+        dlc.refund_tx_id = Some(Txid::from_byte_array([8; 32]).to_string());
+        let receipt =
+            receipt_for(&config(), &dlc, &announcement(&terms), &lock(), &terms).expect("receipt");
+        assert_ne!(receipt.terms_hash, terms_hash(&terms));
+    }
+
     #[test]
     fn refuses_a_forged_announced_at() {
         let mut terms = terms();
@@ -1054,6 +1066,38 @@ mod tests {
         assert!(!error.starts_with("more than"), "{error}");
         let error = attest(&config, &with_outcomes(full + 1)).expect_err("one too many");
         assert_eq!(error, format!("more than {full} outcomes"));
+    }
+
+    /// More funding inputs than a Midnight DLC needs are refused before any signature work.
+    #[test]
+    fn caps_the_funding_inputs() {
+        use ddk_messages::OfferDlc;
+        use lightning::util::ser::{Readable, Writeable};
+        let (config, request) = fixture_request();
+        let with_inputs = |count: usize| {
+            let bytes = hex::decode(&request.offer).expect("hex");
+            let mut offer: OfferDlc =
+                Readable::read(&mut std::io::Cursor::new(bytes)).expect("offer");
+            let input = offer.funding_inputs[0].clone();
+            offer.funding_inputs = vec![input; count];
+            AttestRequest {
+                offer: hex::encode(offer.encode()),
+                ..fixture_request().1
+            }
+        };
+        let unfunded = with_inputs(0);
+        let accept_inputs = funding_summary(&unfunded.offer, &unfunded.accept)
+            .expect("inputs")
+            .inputs;
+        let full = MAX_FUNDING_INPUTS - accept_inputs;
+        // The edited offer no longer rebuilds, so it is refused, but past the cap.
+        let error = attest(&config, &with_inputs(full)).expect_err("refused later");
+        assert!(!error.starts_with("more than"), "{error}");
+        let error = attest(&config, &with_inputs(full + 1)).expect_err("one too many");
+        assert_eq!(
+            error,
+            format!("more than {MAX_FUNDING_INPUTS} funding inputs")
+        );
     }
 
     #[tokio::test]

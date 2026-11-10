@@ -1710,10 +1710,20 @@ mod tests {
         );
         assert_eq!(result.adaptor_valid, Some(false));
         assert_eq!(result.refund_sig_valid, Some(false));
-        assert_ne!(
+        assert_eq!(
             result.verification_status,
-            verifier_schema::VerificationStatus::Pass
+            verifier_schema::VerificationStatus::Fail
         );
+        for failure in [
+            "accepter-adaptor-signatures-invalid",
+            "accepter-refund-signature-invalid-or-unavailable",
+        ] {
+            assert!(
+                result.verification_failures.iter().any(|code| code == failure),
+                "{failure} missing from {:?}",
+                result.verification_failures
+            );
+        }
         Ok(())
     }
 
