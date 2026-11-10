@@ -1719,7 +1719,10 @@ mod tests {
             "accepter-refund-signature-invalid-or-unavailable",
         ] {
             assert!(
-                result.verification_failures.iter().any(|code| code == failure),
+                result
+                    .verification_failures
+                    .iter()
+                    .any(|code| code == failure),
                 "{failure} missing from {:?}",
                 result.verification_failures
             );
