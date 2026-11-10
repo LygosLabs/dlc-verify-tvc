@@ -8,6 +8,6 @@ For a deployed release:
 2. Copy `trusted-release-policy.example.json` into the relying party's separately controlled trust store; never derive trusted values from the Boot Proof under test.
 3. Fetch the Boot Proof by the exact App Proof ephemeral public key.
 4. Run the official proof and `verifier-client` checks, compare the request digest and one-time challenge, and independently authenticate the deployment-only `pivotPath` and `enableEgress` controls.
-5. Set `authorizationReady` to `true` only after the non-debug, egress-disabled deployment is 3/3 healthy and valid, invalid, malformed, oversize, concurrency, and proof canaries pass.
+5. Set `authorizationReady` to `true` only after the non-debug, egress-disabled deployment has all its configured replicas healthy (1/1) and valid, invalid, malformed, oversize, concurrency, and proof canaries pass.
 
 Publishing an image, creating a TVC application, deploying, or setting a deployment live requires separate operational authorization.

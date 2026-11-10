@@ -7,13 +7,16 @@
     "--host", "0.0.0.0",
     "--port", "3000",
     "--network", "mainnet",
-    "--lygos-authorizer", "REPLACE_WITH_MAINNET_MIDNIGHT_AUTHORIZER_ADDRESS",
     "--lygos-funding-pubkey", "REPLACE_WITH_MAINNET_MIDNIGHT_FORDEFI_FUNDING_PUBKEY",
-    "--midnight-oracle-keys", "REPLACE_WITH_MAINNET_MIDNIGHT_ORACLE_KEYS"
+    "--midnight-oracle-keys", "REPLACE_WITH_MAINNET_MIDNIGHT_ORACLE_KEYS",
+    "--min-confirmations", "6"
   ],
   "expectedPivotDigest": "REPLACE_WITH_EXECUTABLE_DIGEST",
   "dangerousDeployDebugMode": false,
   "healthCheckType": "TVC_HEALTH_CHECK_TYPE_HTTP",
   "healthCheckPort": 3000,
-  "publicIngressPort": 3000
+  "publicIngressPort": 3000,
+  "replicas": 1,
+  "instanceSizeCpus": 2,
+  "instanceSizeRam": 1
 }
