@@ -12,9 +12,9 @@
     "mutinynet",
     "--allow-insecure-network",
     "--lygos-funding-pubkey",
-    "REPLACE_WITH_STAGING_FORDEFI_FUNDING_PUBKEY",
+    "020534ae36fe65160956c546a2aeadc2bb7ada4f02940f24ca24a477374e512084",
     "--midnight-oracle-keys",
-    "REPLACE_WITH_STAGING_MIDNIGHT_ORACLE_KEYS",
+    "midnight-2026Q4-staging-v1:c1841c4172c4900dcaed46e8bbc77db1004851858f6ef762c69e4fa32aeb05eb,midnight-2027Q1-staging-v1:5ecf76355cd907951d0e4bdc9b1b6c922a43c1816c1442a96fcab028bdd9e6bb",
     "--min-confirmations",
     "1"
   ],
