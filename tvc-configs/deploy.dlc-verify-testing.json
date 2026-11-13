@@ -9,7 +9,5 @@
   "healthCheckType": "TVC_HEALTH_CHECK_TYPE_HTTP",
   "healthCheckPort": 3000,
   "publicIngressPort": 3000,
-  "replicas": 1,
-  "instanceSizeCpus": 2,
-  "instanceSizeRam": 1
+  "replicas": 1
 }
