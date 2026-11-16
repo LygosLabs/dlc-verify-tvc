@@ -454,6 +454,10 @@ mod tests {
                 "6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000",
             ),
             (
+                bitcoin::Network::Testnet,
+                "43497fd7f826957108f4a30fd9cec3aeba79972084e90ead01ea330900000000",
+            ),
+            (
                 bitcoin::Network::Testnet4,
                 "43f08bdab050e35b567c864b91f47f50ae725ae2de53bcfbbaf284da00000000",
             ),
