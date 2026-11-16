@@ -153,7 +153,8 @@ pub struct Liquidator {
 /// The salted commitment to a liquidator's Bitcoin payout script that the Originator's registry
 /// stores: SHA-256 of `"lygos-liquidator-payout-v1"`, the Bitcoin network's chain hash, the
 /// liquidator's address, the script and the salt, as lowercase hex (the address `0x`-prefixed)
-/// joined with `//`. The chain hash is in the byte order the DLC offer carries it. The salt keeps
+/// joined with `//`. The chain hash is rust-bitcoin's `ChainHash`: the genesis block hash in
+/// internal byte order, the reverse of how explorers print it (pinned in the tests). The salt keeps
 /// a known address from being matched to the hash, so the chain never learns a Bitcoin address.
 #[must_use]
 pub fn payout_script_hash(
@@ -441,6 +442,36 @@ mod tests {
         assert_ne!(hash(&mainnet, &cc.address, &script, 1), aa.script_hash);
         assert_ne!(hash(&mainnet, &aa.address, &script[1..], 1), aa.script_hash);
         assert_ne!(hash(&mainnet, &aa.address, &script, 2), aa.script_hash);
+    }
+
+    /// The chain hashes the payout script hash commits to, as the README spells them for the
+    /// repos that compute it without a DLC offer at hand.
+    #[test]
+    fn payout_script_hash_chain_hashes_are_pinned() {
+        for (network, hex) in [
+            (
+                bitcoin::Network::Bitcoin,
+                "6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000",
+            ),
+            (
+                bitcoin::Network::Testnet4,
+                "43f08bdab050e35b567c864b91f47f50ae725ae2de53bcfbbaf284da00000000",
+            ),
+            (
+                bitcoin::Network::Signet,
+                "f61eee3b63a380a477a063af32b2bbc97c9ff9f01f2c4225e973988108000000",
+            ),
+            (
+                bitcoin::Network::Regtest,
+                "06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f",
+            ),
+        ] {
+            assert_eq!(
+                hex::encode(network.chain_hash().as_bytes()),
+                hex,
+                "{network}"
+            );
+        }
     }
 
     /// Pinned against an independent SHA-256 of the documented preimage; a layout change

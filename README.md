@@ -86,7 +86,16 @@ The Midnight oracle signs with one key per calendar quarter. `--midnight-oracle-
 
 The event id commits to orange-grove's `requestId` for the announcement, sent in the attest body as a lowercase hyphenated UUID: `sha256("lygos-midnight-v2" // chainId // originator // marketId // requestId // liquidators // controller // mintDeadline // announcedAt)`, named `midnight-<DDMMMYY>-<digest>`. The borrower's funding key is not in the event id, because ddk generates it after the announcement exists; `termsHash` binds both funding keys from the DLC instead.
 
-Each liquidator in the event id is `address:scriptHash`, joined with `,` in the outcome list's (ascending address) order. `scriptHash` is the salted hash of the liquidator's Bitcoin payout script that the Originator's registry holds: `sha256("lygos-liquidator-payout-v1" // chainHash // address // script // salt)`, all lowercase hex, the address `0x`-prefixed, `chainHash` in the byte order the DLC offer carries it, and `salt` 32 random bytes. The attest body carries `liquidators: [{address, scriptHash, salt}]` in the same order. The enclave refuses the receipt unless that list names exactly the outcome list's liquidators, and unless each `liquidated-by` CET has one output whose script hashes, under the liquidator's salt and the DLC's network, to its `scriptHash`. That covers a CET redirected by a payout script override and Lygos's own accepter script (the backup liquidator) alike. The hashes are under the oracle's signature through the event id, so a request cannot bring hashes of its own.
+Each liquidator in the event id is `0x<address>:0x<scriptHash>`, both lowercase hex, joined with `,` in the outcome list's (ascending address) order. `scriptHash` is the salted hash of the liquidator's Bitcoin payout script that the Originator's registry holds: `sha256("lygos-liquidator-payout-v1" // chainHash // address // script // salt)`, all lowercase hex with no prefix except the address, which is `0x`-prefixed, and `salt` 32 random bytes. `chainHash` is the genesis block hash in internal byte order, the reverse of how explorers print it:
+
+| Network | `chainHash` |
+|---|---|
+| mainnet | `6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000` |
+| testnet4 | `43f08bdab050e35b567c864b91f47f50ae725ae2de53bcfbbaf284da00000000` |
+| signet, Mutinynet | `f61eee3b63a380a477a063af32b2bbc97c9ff9f01f2c4225e973988108000000` |
+| regtest | `06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f` |
+
+The attest body carries `liquidators: [{address, scriptHash, salt}]` in the same order. The enclave refuses the receipt unless that list names exactly the outcome list's liquidators, and unless each `liquidated-by` CET has one output whose script hashes, under the liquidator's salt and the DLC's network, to its `scriptHash`. That covers a CET redirected by a payout script override and Lygos's own accepter script (the backup liquidator) alike. The hashes are under the oracle's signature through the event id, so a request cannot bring hashes of its own.
 
 Build the image with `make out/mint-attester/index.json`. CI publishes it as `ghcr.io/lygoslabs/mint-attester` and prints the image digest and executable digest.
 

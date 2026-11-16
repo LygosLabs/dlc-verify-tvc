@@ -722,9 +722,15 @@ mod tests {
             event_id: midnight::event_name(market.maturity, &event_id),
             chain_hash: *Network::Bitcoin.chain_hash().as_bytes(),
             contract_flags: REFUND_TO_ACCEPTER_FLAG,
-            outcomes: ["not-minted", "released", LIQUIDATOR]
-                .map(str::to_owned)
-                .to_vec(),
+            outcomes: ["not-minted".to_owned(), "released".to_owned()]
+                .into_iter()
+                .chain(
+                    terms
+                        .liquidators
+                        .iter()
+                        .map(|liquidator| format!("liquidated-by-{}", liquidator.address)),
+                )
+                .collect(),
         }
     }
 
@@ -890,6 +896,44 @@ mod tests {
         let error = receipt_for(&config(), &dlc, &announcement, &lock(), &terms)
             .expect_err("the announced hash is the registry's");
         assert!(error.contains("event id"), "{error}");
+    }
+
+    /// Every liquidator's CET is checked, not just the first: with two registered liquidators,
+    /// the second's CET paying another script is refused.
+    #[test]
+    fn checks_every_liquidators_cet() {
+        const SECOND: &str = "liquidated-by-0x00000000000000000000000000000000000000bb";
+        let second_script = format!("5120{}", "cd".repeat(32));
+        let mut terms = terms();
+        terms.liquidators.push(Liquidator {
+            address: SECOND["liquidated-by-".len()..].to_owned(),
+            script_hash: midnight::payout_script_hash(
+                Network::Bitcoin.chain_hash().as_bytes(),
+                &SECOND["liquidated-by-".len()..],
+                &hex::decode(&second_script).expect("script"),
+                &SALT,
+            ),
+            salt: SALT,
+        });
+        let announcement = announcement(&terms);
+        let with_second = |script: &str| {
+            let mut dlc = dlc();
+            let mut outcome = dlc.outcomes[2].clone();
+            outcome.label = SECOND.to_owned();
+            dlc.outcomes.push(outcome);
+            let mut cet = liquidation_cet(&mut dlc).clone();
+            cet.outcome = SECOND.to_owned();
+            cet.txid = Txid::from_byte_array([8; 32]).to_string();
+            cet.outputs[0].script_pub_key = script.to_owned();
+            dlc.cets.push(cet);
+            receipt_for(&config(), &dlc, &announcement, &lock(), &terms)
+        };
+        assert!(with_second(&second_script).is_ok());
+        let error = with_second(PAYOUT_SCRIPT).expect_err("the second CET pays the first's script");
+        assert!(
+            error.contains(&format!("the {SECOND} CET does not pay")),
+            "{error}"
+        );
     }
 
     #[test]
