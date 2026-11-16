@@ -1,7 +1,7 @@
 //! The attest endpoint: DLC transcript, Midnight policy, lock proof, signed receipt.
 
 use crate::{
-    midnight::{self, OracleKeys, REFUND_GAP_SECS, RequestId, Terms},
+    midnight::{self, Liquidator, OracleKeys, REFUND_GAP_SECS, RequestId, Terms},
     receipt::{Domain, Receipt, sign_digest},
     spv::{Lock, LockProof, verify_lock},
 };
@@ -84,12 +84,27 @@ pub struct AttestRequest {
     pub announced_at: u64,
     /// orange-grove's request id for the announcement, a lowercase hyphenated UUID.
     pub request_id: String,
+    /// Every liquidator the outcome list names, in its order, with the payout script hash the
+    /// registry held when the oracle froze the set and that hash's salt.
+    pub liquidators: Vec<LiquidatorEntry>,
     /// `Verifier` address the receipt is signed for.
     pub verifier: String,
     /// Ignored. The retired Midnight authorizer's signature, still accepted in the body so a
     /// client that sends it keeps working until it stops.
     #[serde(default)]
     pub authorization: Option<IgnoredAny>,
+}
+
+/// One liquidator in the attest body. Hex; may carry a `0x` prefix.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LiquidatorEntry {
+    /// The liquidator's EVM address.
+    pub address: String,
+    /// The salted payout script hash the Originator's registry holds for it.
+    pub script_hash: String,
+    /// The 32-byte salt in that hash.
+    pub salt: String,
 }
 
 /// The request's EVM-side terms, decoded.
@@ -109,6 +124,8 @@ pub struct LoanTerms {
     pub announced_at: u64,
     /// orange-grove's request id for the announcement.
     pub request_id: RequestId,
+    /// The liquidators and their registered payout script hashes, in the outcome list's order.
+    pub liquidators: Vec<Liquidator>,
 }
 
 /// Check a request end to end and return the signed receipt as JSON.
@@ -117,6 +134,12 @@ pub struct LoanTerms {
 ///
 /// Returns why the request was refused.
 pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String> {
+    if request.liquidators.len() > midnight::MAX_LIQUIDATORS {
+        return Err(format!(
+            "more than {} liquidators",
+            midnight::MAX_LIQUIDATORS
+        ));
+    }
     let terms = LoanTerms {
         market: bytes("market", &request.market)?,
         chain_id: request.chain_id,
@@ -125,6 +148,20 @@ pub fn attest(config: &Config, request: &AttestRequest) -> Result<Value, String>
         mint_deadline: request.mint_deadline,
         announced_at: request.announced_at,
         request_id: request.request_id.parse()?,
+        liquidators: request
+            .liquidators
+            .iter()
+            .map(|entry| {
+                Ok(Liquidator {
+                    address: format!(
+                        "0x{}",
+                        hex::encode(fixed::<20>("liquidator address", &entry.address)?)
+                    ),
+                    script_hash: fixed("liquidator scriptHash", &entry.script_hash)?,
+                    salt: fixed("liquidator salt", &entry.salt)?,
+                })
+            })
+            .collect::<Result<_, String>>()?,
     };
     let verifier = fixed("verifier", &request.verifier)?;
 
@@ -292,12 +329,48 @@ pub fn receipt_for(
     }
 
     let liquidators = midnight::liquidators(&announcement.outcomes, terms.mint_deadline != 0)?;
+    if !terms
+        .liquidators
+        .iter()
+        .map(|liquidator| liquidator.address.as_str())
+        .eq(liquidators)
+    {
+        return Err("the request's liquidators are not the outcome list's".to_owned());
+    }
+    // Each liquidation CET must pay the script its liquidator registered. The CET pays the
+    // borrower nothing, so it has one output, and that output's script is the payout whether it
+    // came from a payout script override or is Lygos's own accepter script (the backup
+    // liquidator). The registry's hash is in the event id below, under the oracle's signature,
+    // so a request cannot swap in a hash of its own.
+    for liquidator in &terms.liquidators {
+        let outcome = format!("liquidated-by-{}", liquidator.address);
+        let outputs = dlc
+            .cets
+            .iter()
+            .find(|cet| cet.outcome == outcome)
+            .map(|cet| cet.outputs.as_slice());
+        let script = match outputs {
+            Some([output]) => bytes("CET output script", &output.script_pub_key)?,
+            _ => return Err(format!("the {outcome} CET must have exactly one output")),
+        };
+        let hash = midnight::payout_script_hash(
+            &announcement.chain_hash,
+            &liquidator.address,
+            &script,
+            &liquidator.salt,
+        );
+        if hash != liquidator.script_hash {
+            return Err(format!(
+                "the {outcome} CET does not pay the liquidator's registered payout script"
+            ));
+        }
+    }
     let event_id = midnight::event_id(
         terms.chain_id,
         &terms.originator,
         &market.id,
         &terms.request_id,
-        &liquidators,
+        &terms.liquidators,
         &terms.controller,
         terms.mint_deadline,
         terms.announced_at,
@@ -320,11 +393,11 @@ pub fn receipt_for(
         return Err("the proven output is not the DLC's funding output".to_owned());
     }
 
-    // ponytail: payout addresses stay off-chain, where each co-signer checks its own, so only the
-    // split is checked here: Lygos stakes nothing, the borrower takes the whole collateral unless
-    // the loan is liquidated, and the Lygos side takes it all when it is. That side's output may
-    // pay the liquidator's script instead (a payout script override); the liquidator checks its
-    // own CET, and the Lygos key's adaptor signatures cover every CET.
+    // The borrower checks the script it is paid to when it co-signs, and each liquidation CET's
+    // script was checked against the registry above, so only the split is checked here: Lygos
+    // stakes nothing, the borrower takes the whole collateral unless the loan is liquidated, and
+    // the Lygos side takes it all when it is. That side's output may pay the liquidator's script
+    // instead (a payout script override), and the Lygos key's adaptor signatures cover every CET.
     if dlc.accept_collateral.as_deref() != Some("0") {
         return Err("Lygos must stake no collateral".to_owned());
     }
@@ -531,7 +604,7 @@ async fn handle(State(config): State<Arc<Config>>, request: Request) -> Response
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use verifier_schema::{CetTransactionInfo, OutcomeInfo};
+    use verifier_schema::{CetTransactionInfo, OutcomeInfo, TransactionOutputInfo};
 
     // The generator and twice the generator: real points, so the typed config parses them.
     const LYGOS: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
@@ -543,6 +616,9 @@ mod tests {
     /// Stand-in funding witness script; the lock's output is its P2WSH.
     const WITNESS_SCRIPT: [u8; 1] = [0x51];
     const LIQUIDATOR: &str = "liquidated-by-0x00000000000000000000000000000000000000aa";
+    /// The script the liquidation CET pays, and the one registered for its liquidator.
+    const PAYOUT_SCRIPT: &str = "00141111111111111111111111111111111111111111";
+    const SALT: [u8; 32] = [0x5a; 32];
     // The market in `midnight::tests`: chain 8453, maturing at 1798156800.
     const MARKET: &str = "0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000210500000000000000000000000000000000000000000000000000000000000000a100000000000000000000000000000000000000000000000000000000000000b20000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000006b2db200000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000c30000000000000000000000000000000000000000000000000bef55718ad6000000000000000000000000000000000000000000000000000003782dace9d9000000000000000000000000000000000000000000000000000000000000000000d4";
     const MATURITY: u32 = 1_798_156_800;
@@ -572,6 +648,22 @@ mod tests {
             mint_deadline: 1_790_000_000,
             announced_at: 1_789_000_000,
             request_id: REQUEST_ID.parse().expect("request id"),
+            liquidators: vec![registered(PAYOUT_SCRIPT)],
+        }
+    }
+
+    /// `LIQUIDATOR` as the registry holds it after registering `script` on mainnet.
+    fn registered(script: &str) -> Liquidator {
+        let address = LIQUIDATOR["liquidated-by-".len()..].to_owned();
+        Liquidator {
+            script_hash: midnight::payout_script_hash(
+                Network::Bitcoin.chain_hash().as_bytes(),
+                &address,
+                &hex::decode(script).expect("script"),
+                &SALT,
+            ),
+            address,
+            salt: SALT,
         }
     }
 
@@ -584,7 +676,7 @@ mod tests {
             &terms.originator,
             &market.id,
             &terms.request_id,
-            &[&LIQUIDATOR["liquidated-by-".len()..]],
+            &terms.liquidators,
             &terms.controller,
             terms.mint_deadline,
             terms.announced_at,
@@ -620,7 +712,7 @@ mod tests {
             &terms.originator,
             &market.id,
             &terms.request_id,
-            &[&LIQUIDATOR["liquidated-by-".len()..]],
+            &terms.liquidators,
             &terms.controller,
             terms.mint_deadline,
             terms.announced_at,
@@ -641,7 +733,12 @@ mod tests {
             outcome: outcome.to_owned(),
             txid: Txid::from_byte_array([byte; 32]).to_string(),
             locktime: 0,
-            outputs: Vec::new(),
+            outputs: vec![TransactionOutputInfo {
+                index: 0,
+                sats: "50000000".to_owned(),
+                script_pub_key: PAYOUT_SCRIPT.to_owned(),
+                address: None,
+            }],
         };
         DlcVerifyResult {
             verification_status: VerificationStatus::Pass,
@@ -701,13 +798,16 @@ mod tests {
     /// still the Lygos side's whole payout.
     #[test]
     fn issues_a_receipt_when_the_liquidator_is_paid_directly() {
-        let terms = terms();
+        let script = format!("5120{}", "ab".repeat(32));
+        let mut terms = terms();
+        terms.liquidators = vec![registered(&script)];
         let mut dlc = dlc();
         for outcome in &mut dlc.outcomes {
             if outcome.label == LIQUIDATOR {
-                outcome.accepter_payout_override = Some(format!("5120{}", "ab".repeat(32)));
+                outcome.accepter_payout_override = Some(script.clone());
             }
         }
+        liquidation_cet(&mut dlc).outputs[0].script_pub_key = script;
         let receipt =
             receipt_for(&config(), &dlc, &announcement(&terms), &lock(), &terms).expect("receipt");
         assert_eq!(receipt.terms_hash, terms_hash(&terms));
@@ -727,6 +827,104 @@ mod tests {
             let error = receipt_for(&config(), &dlc, &announcement(&terms), &lock(), &terms)
                 .expect_err("an override on a borrower outcome");
             assert!(error.contains("must not be redirected"), "{label}: {error}");
+        }
+    }
+
+    fn liquidation_cet(dlc: &mut DlcVerifyResult) -> &mut CetTransactionInfo {
+        dlc.cets
+            .iter_mut()
+            .find(|cet| cet.outcome == LIQUIDATOR)
+            .expect("liquidation CET")
+    }
+
+    /// The registry, the announcement and the request agree, but the liquidation CET pays some
+    /// other script: no receipt, whether the script came from an override or the Lygos side.
+    #[test]
+    fn refuses_a_liquidation_cet_that_pays_another_script() {
+        let terms = terms();
+        for other in [
+            format!("5120{}", "ab".repeat(32)),
+            "00142222222222222222222222222222222222222222".to_owned(),
+        ] {
+            let mut dlc = dlc();
+            liquidation_cet(&mut dlc).outputs[0].script_pub_key = other;
+            let error = receipt_for(&config(), &dlc, &announcement(&terms), &lock(), &terms)
+                .expect_err("the CET pays another script");
+            assert!(error.contains("registered payout script"), "{error}");
+        }
+    }
+
+    /// The hash is checked with the request's salt and the DLC's Bitcoin network, so the same
+    /// script under another salt or on another network is not the registered one.
+    #[test]
+    fn refuses_a_payout_script_hash_with_another_salt_or_network() {
+        let announcement = announcement(&terms());
+        let mut other_salt = terms();
+        other_salt.liquidators[0].salt = [0x5b; 32];
+        let error = receipt_for(&config(), &dlc(), &announcement, &lock(), &other_salt)
+            .expect_err("another salt");
+        assert!(error.contains("registered payout script"), "{error}");
+
+        let mut signet = terms();
+        signet.liquidators[0].script_hash = midnight::payout_script_hash(
+            Network::Signet.chain_hash().as_bytes(),
+            &signet.liquidators[0].address,
+            &hex::decode(PAYOUT_SCRIPT).expect("script"),
+            &SALT,
+        );
+        let error = receipt_for(&config(), &dlc(), &announcement, &lock(), &signet)
+            .expect_err("a signet hash on mainnet");
+        assert!(error.contains("registered payout script"), "{error}");
+    }
+
+    /// A request that brings its own hash for the script the CET pays still fails: the oracle
+    /// signed the registry's hash into the event id.
+    #[test]
+    fn refuses_a_script_hash_the_oracle_did_not_announce() {
+        let announcement = announcement(&terms());
+        let other = "00142222222222222222222222222222222222222222";
+        let mut terms = terms();
+        terms.liquidators = vec![registered(other)];
+        let mut dlc = dlc();
+        liquidation_cet(&mut dlc).outputs[0].script_pub_key = other.to_owned();
+        let error = receipt_for(&config(), &dlc, &announcement, &lock(), &terms)
+            .expect_err("the announced hash is the registry's");
+        assert!(error.contains("event id"), "{error}");
+    }
+
+    #[test]
+    fn refuses_liquidators_that_are_not_the_outcome_lists() {
+        let announcement = announcement(&terms());
+        let mut missing = terms();
+        missing.liquidators.clear();
+        let mut extra = terms();
+        extra.liquidators.push(Liquidator {
+            address: format!("0x{}", "bb".repeat(20)),
+            ..registered(PAYOUT_SCRIPT)
+        });
+        let mut renamed = terms();
+        renamed.liquidators[0].address = format!("0x{}", "bb".repeat(20));
+        for terms in [missing, extra, renamed] {
+            let error = receipt_for(&config(), &dlc(), &announcement, &lock(), &terms)
+                .expect_err("not the outcome list's liquidators");
+            assert!(error.contains("not the outcome list's"), "{error}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_liquidation_cet_without_exactly_one_output() {
+        let terms = terms();
+        let mut none = dlc();
+        liquidation_cet(&mut none).outputs.clear();
+        let mut two = dlc();
+        let output = liquidation_cet(&mut two).outputs[0].clone();
+        liquidation_cet(&mut two).outputs.push(output);
+        let mut absent = dlc();
+        absent.cets.retain(|cet| cet.outcome != LIQUIDATOR);
+        for dlc in [none, two, absent] {
+            let error = receipt_for(&config(), &dlc, &announcement(&terms), &lock(), &terms)
+                .expect_err("a liquidation CET has one output");
+            assert!(error.contains("exactly one output"), "{error}");
         }
     }
 
@@ -965,6 +1163,11 @@ mod tests {
             mint_deadline: 1_790_000_000,
             announced_at: 1_789_000_000,
             request_id: REQUEST_ID.to_owned(),
+            liquidators: vec![LiquidatorEntry {
+                address: LIQUIDATOR["liquidated-by-".len()..].to_owned(),
+                script_hash: hex0x(&registered(PAYOUT_SCRIPT).script_hash),
+                salt: hex::encode(SALT),
+            }],
             verifier: hex0x(&[0x11; 20]),
             authorization: None,
         };
@@ -1068,6 +1271,49 @@ mod tests {
         assert_eq!(error, format!("more than {full} outcomes"));
     }
 
+    /// The request's liquidator list is capped before anything is decoded, and its addresses are
+    /// read as bytes, so a checksummed or unprefixed address names the same liquidator.
+    #[test]
+    fn caps_and_canonicalises_the_request_liquidators() {
+        let (config, request) = fixture_request();
+        let entry = &request.liquidators[0];
+        let too_many = AttestRequest {
+            liquidators: (0..=midnight::MAX_LIQUIDATORS)
+                .map(|_| LiquidatorEntry {
+                    address: entry.address.clone(),
+                    script_hash: entry.script_hash.clone(),
+                    salt: entry.salt.clone(),
+                })
+                .collect(),
+            ..fixture_request().1
+        };
+        assert_eq!(
+            attest(&config, &too_many).expect_err("one too many"),
+            format!("more than {} liquidators", midnight::MAX_LIQUIDATORS)
+        );
+        let terms = terms();
+        let liquidator = &terms.liquidators[0];
+        let spelled = |address: String| {
+            let request = AttestRequest {
+                liquidators: vec![LiquidatorEntry {
+                    address,
+                    script_hash: hex::encode(liquidator.script_hash),
+                    salt: format!("0x{}", hex::encode(liquidator.salt)),
+                }],
+                ..fixture_request().1
+            };
+            // Refused later, for the testnet transcript's network, so the entry parsed.
+            attest(&config, &request).expect_err("a testnet DLC on mainnet")
+        };
+        for address in [
+            liquidator.address.to_uppercase().replacen("0X", "0x", 1),
+            liquidator.address["0x".len()..].to_owned(),
+        ] {
+            assert!(spelled(address).contains("another Bitcoin network"));
+        }
+        assert!(spelled("0xaa".to_owned()).contains("liquidator address"));
+    }
+
     /// More funding inputs than a Midnight DLC needs are refused before any signature work.
     #[test]
     fn caps_the_funding_inputs() {
@@ -1128,7 +1374,7 @@ mod tests {
             "offer": "", "accept": "", "sign": "", "tx": "", "txIndex": 0,
             "merkleBranch": [], "headers": [], "market": "", "chainId": 1,
             "originator": "", "controller": "", "mintDeadline": 0, "announcedAt": 0,
-            "requestId": "", "verifier": "",
+            "requestId": "", "liquidators": [], "verifier": "",
         });
         assert!(serde_json::from_value::<AttestRequest>(body.clone()).is_ok());
         body["authorization"] = json!(format!("0x{}", "00".repeat(65)));
