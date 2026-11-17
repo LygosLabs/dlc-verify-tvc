@@ -93,7 +93,7 @@ jobs:
                originator: "0x0000000000000000000000000000000000000000",
                controller: "0x0000000000000000000000000000000000000000",
                mintDeadline: 0, announcedAt: 0,
-               requestId: "00000000-0000-0000-0000-000000000000",
+               requestId: "00000000-0000-0000-0000-000000000000", liquidators: [],
                verifier: "0x0000000000000000000000000000000000000000"}' \
             crates/verifier-core/tests/fixtures/testnet-loan-118c9fc9.json > "${RUNNER_TEMP}/attest-request.json"
           status=$(curl --silent --output "${RUNNER_TEMP}/attest-response.json" --write-out '%{http_code}' \

@@ -138,14 +138,52 @@ impl FromStr for RequestId {
     }
 }
 
+/// A registered liquidator as the event id names it: its EVM address, and the salted hash of the
+/// Bitcoin script its `liquidated-by` CET must pay, as it sits in the Originator's registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Liquidator {
+    /// Lowercase `0x` hex, as in the outcome label.
+    pub address: String,
+    /// [`payout_script_hash`] of the liquidator's payout script.
+    pub script_hash: [u8; 32],
+    /// The random salt in that hash. Off-chain: the registry holds only the hash.
+    pub salt: [u8; 32],
+}
+
+/// The salted commitment to a liquidator's Bitcoin payout script that the Originator's registry
+/// stores: SHA-256 of `"lygos-liquidator-payout-v1"`, the Bitcoin network's chain hash, the
+/// liquidator's address, the script and the salt, as lowercase hex (the address `0x`-prefixed)
+/// joined with `//`. The chain hash is rust-bitcoin's `ChainHash`: the genesis block hash in
+/// internal byte order, the reverse of how explorers print it (pinned in the tests). The salt keeps
+/// a known address from being matched to the hash, so the chain never learns a Bitcoin address.
+#[must_use]
+pub fn payout_script_hash(
+    chain_hash: &[u8; 32],
+    address: &str,
+    script: &[u8],
+    salt: &[u8; 32],
+) -> [u8; 32] {
+    let preimage = [
+        "lygos-liquidator-payout-v1",
+        &hex::encode(chain_hash),
+        address,
+        &hex::encode(script),
+        &hex::encode(salt),
+    ]
+    .join("//");
+    Sha256::digest(preimage.as_bytes()).into()
+}
+
 /// The Midnight oracle event id as the receipt carries it: the SHA-256 digest alone. The
 /// announcement names the event `"midnight-"`, the maturity label, `"-"`, then this digest in
 /// lowercase hex (see [`event_name`]).
 ///
 /// Terms are canonical strings joined with `//`: decimal integers, lowercase `0x` hex for EVM
-/// values, the request id as its 36-character UUID, and liquidators joined with `,`.
-/// `announced_at` is in the preimage so the oracle's signature covers the receipt's
-/// `announcedAt`; nothing else the enclave checks binds it.
+/// values, the request id as its 36-character UUID, and the liquidators as `address:scriptHash`
+/// (both lowercase `0x` hex) joined with `,` in the outcome list's order. `announced_at` is in
+/// the preimage so the oracle's signature covers the receipt's `announcedAt`; nothing else the
+/// enclave checks binds it. The script hashes are in it so the oracle's signature covers the
+/// registry entries the enclave checks each liquidation CET against.
 #[must_use]
 #[allow(clippy::too_many_arguments)] // ponytail: mirrors the preimage order, one call site
 pub fn event_id(
@@ -153,18 +191,29 @@ pub fn event_id(
     originator: &[u8; 20],
     market_id: &[u8; 32],
     request_id: &RequestId,
-    liquidators: &[&str],
+    liquidators: &[Liquidator],
     controller: &[u8; 20],
     mint_deadline: u64,
     announced_at: u64,
 ) -> [u8; 32] {
+    let liquidators = liquidators
+        .iter()
+        .map(|liquidator| {
+            format!(
+                "{}:0x{}",
+                liquidator.address,
+                hex::encode(liquidator.script_hash)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     let preimage = [
-        "lygos-midnight-v1",
+        "lygos-midnight-v2",
         &chain_id.to_string(),
         &format!("0x{}", hex::encode(originator)),
         &format!("0x{}", hex::encode(market_id)),
         request_id.as_str(),
-        &liquidators.join(","),
+        &liquidators,
         &format!("0x{}", hex::encode(controller)),
         &mint_deadline.to_string(),
         &announced_at.to_string(),
@@ -348,11 +397,91 @@ mod tests {
     const MARKET: &str = "0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000210500000000000000000000000000000000000000000000000000000000000000a100000000000000000000000000000000000000000000000000000000000000b20000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000006b2db200000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000c30000000000000000000000000000000000000000000000000bef55718ad6000000000000000000000000000000000000000000000000000003782dace9d9000000000000000000000000000000000000000000000000000000000000000000d4";
     const MARKET_ID: &str = "e7d2aa696b1fa2e75e4afc253f5b8ee8b2ca0b0103328d248f8bd5572a56a353";
 
+    /// Two liquidators, one paid to a P2TR script and one to a P2WPKH script, on mainnet.
+    fn two_liquidators() -> [Liquidator; 2] {
+        let mainnet = bitcoin::Network::Bitcoin.chain_hash();
+        [
+            ("aa", format!("5120{}", "ab".repeat(32)), 1),
+            ("cc", format!("0014{}", "cd".repeat(20)), 2),
+        ]
+        .map(|(byte, script, salt)| {
+            let address = format!("0x{}", byte.repeat(20));
+            let script = hex::decode(script).expect("script");
+            let salt = [salt; 32];
+            Liquidator {
+                script_hash: payout_script_hash(mainnet.as_bytes(), &address, &script, &salt),
+                address,
+                salt,
+            }
+        })
+    }
+
+    /// Pinned against an independent SHA-256 of the documented preimage. orange-grove registers
+    /// this hash on-chain and the oracle copies it into the event id, so a change here must
+    /// change both and the whitepaper together.
+    #[test]
+    fn payout_script_hash_is_pinned() {
+        let [aa, cc] = two_liquidators();
+        assert_eq!(
+            hex::encode(aa.script_hash),
+            "392760560b6968f8473020e472a2419884cf56a3b90d43f8c2532b211d1a3f34"
+        );
+        assert_eq!(
+            hex::encode(cc.script_hash),
+            "c16af9e88f4dc9cb2aa945638e7ef6ec02560911ffce21f4252d9d5dcce1d382"
+        );
+        // Every committed term changes the hash.
+        let mainnet = *bitcoin::Network::Bitcoin.chain_hash().as_bytes();
+        let signet = *bitcoin::Network::Signet.chain_hash().as_bytes();
+        let script = hex::decode(format!("5120{}", "ab".repeat(32))).expect("script");
+        let hash = |chain: &[u8; 32], address: &str, script: &[u8], salt: u8| {
+            payout_script_hash(chain, address, script, &[salt; 32])
+        };
+        assert_eq!(hash(&mainnet, &aa.address, &script, 1), aa.script_hash);
+        assert_ne!(hash(&signet, &aa.address, &script, 1), aa.script_hash);
+        assert_ne!(hash(&mainnet, &cc.address, &script, 1), aa.script_hash);
+        assert_ne!(hash(&mainnet, &aa.address, &script[1..], 1), aa.script_hash);
+        assert_ne!(hash(&mainnet, &aa.address, &script, 2), aa.script_hash);
+    }
+
+    /// The chain hashes the payout script hash commits to, as the README spells them for the
+    /// repos that compute it without a DLC offer at hand.
+    #[test]
+    fn payout_script_hash_chain_hashes_are_pinned() {
+        for (network, hex) in [
+            (
+                bitcoin::Network::Bitcoin,
+                "6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000",
+            ),
+            (
+                bitcoin::Network::Testnet,
+                "43497fd7f826957108f4a30fd9cec3aeba79972084e90ead01ea330900000000",
+            ),
+            (
+                bitcoin::Network::Testnet4,
+                "43f08bdab050e35b567c864b91f47f50ae725ae2de53bcfbbaf284da00000000",
+            ),
+            (
+                bitcoin::Network::Signet,
+                "f61eee3b63a380a477a063af32b2bbc97c9ff9f01f2c4225e973988108000000",
+            ),
+            (
+                bitcoin::Network::Regtest,
+                "06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f",
+            ),
+        ] {
+            assert_eq!(
+                hex::encode(network.chain_hash().as_bytes()),
+                hex,
+                "{network}"
+            );
+        }
+    }
+
     /// Pinned against an independent SHA-256 of the documented preimage; a layout change
-    /// must change this digest and the whitepaper together. The terms are dlcmsg's
-    /// `enclave-layout-on-curve-key` vector with the request id in the funding key's slot.
+    /// must change this digest and the whitepaper together.
     // TODO(cross-check): replace with chainlink-oracle `dlcmsg/testdata/midnight-vectors.json`
-    // once PR #81 (`ben/midnight-orange-grove`) carries request-id vectors.
+    // once the oracle puts the registry's script hashes in the event id (ENG-1925).
     #[test]
     fn event_id_is_pinned() {
         let id = event_id(
@@ -362,17 +491,14 @@ mod tests {
             &"0f8b7c2e-4d1a-4e6b-9c3f-2a5d8e7b1c40"
                 .parse()
                 .expect("request id"),
-            &[
-                &format!("0x{}", "aa".repeat(20)),
-                &format!("0x{}", "cc".repeat(20)),
-            ],
+            &two_liquidators(),
             &[0xc0; 20],
             1_790_000_000,
             1_789_000_000,
         );
         assert_eq!(
             hex::encode(id),
-            "bf923f92df8d8c9180e8ce5ced2a70b74ebc35ae934f01f7537b0e1755485d38"
+            "59c92184f19eabbb57c58cca2cc914d6fd62ce2b7d8e6b350cb1f09e08e16cd0"
         );
     }
 
