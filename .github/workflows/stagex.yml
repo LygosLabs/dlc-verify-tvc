@@ -15,7 +15,7 @@ on:
       - "images/**"
       - "Makefile"
       - "rust-toolchain.toml"
-      - "scripts/tvc-release.sh"
+      - "scripts/tvc-*.sh"
       - "tvc-configs/**"
   workflow_dispatch: # Allows manual invocation
 
@@ -236,13 +236,16 @@ jobs:
     needs: images
     if: github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
         env: [staging]
+    concurrency:
+      group: tvc-release-${{ matrix.env }}
+      cancel-in-progress: false
     environment: ${{ matrix.env }}
     env:
       TVC_ORG_ID: ${{ secrets.TVC_ORG_ID }}

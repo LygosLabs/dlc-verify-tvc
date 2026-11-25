@@ -11,6 +11,8 @@
 # Auth: TVC_ORG_ID, TVC_API_KEY_PUBLIC, TVC_API_KEY_PRIVATE, or a logged-in ~/.config/turnkey.
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/tvc-wait-live.sh"
+
 env_name=${1:?environment}
 image=${2:?image url}
 exec_digest=${3:?executable digest}
@@ -174,23 +176,20 @@ if [ "${live}" != "${deploy_id}" ]; then
 fi
 echo "live deployment set to ${deploy_id}"
 
-for attempt in $(seq 1 12); do
-  if curl --fail --silent --max-time 10 "${health_url}" >/dev/null; then
-    echo "${health_url} ok"
-    break
-  fi
-  if [ "${attempt}" -eq 12 ]; then
-    echo "${health_url} not healthy 2 minutes after switching to ${deploy_id}"
-    if [ -n "${previous}" ] && [ "${previous}" != "${deploy_id}" ]; then
-      tvc_quiet app set-live-deploy --deploy-id "${previous}"
-      echo "rolled live deployment back to ${previous}; ${deploy_id} left for inspection"
-    else
-      echo "::warning::no previous deployment to roll back to; ${deploy_id} is still live and needs manual attention"
+if ! wait_for_live_deployment "${app_id}" "${deploy_id}" "${health_url}"; then
+  echo "${deploy_id} did not become live and healthy within the routing verification window"
+  if [ -n "${previous}" ] && [ "${previous}" != "${deploy_id}" ]; then
+    tvc_quiet app set-live-deploy --deploy-id "${previous}"
+    echo "rollback to ${previous} accepted; ${deploy_id} left for inspection"
+    if ! wait_for_live_deployment "${app_id}" "${previous}" "${health_url}"; then
+      echo "::error::rollback health could not be verified; manual attention required"
     fi
-    exit 1
+  else
+    echo "::warning::no previous deployment to roll back to; ${deploy_id} needs manual attention"
   fi
-  sleep 10
-done
+  summary "failed live routing/health verification"
+  exit 1
+fi
 
 if [ -n "${previous}" ] && [ "${previous}" != "${deploy_id}" ]; then
   tvc_quiet deploy delete --deploy-id "${previous}"
