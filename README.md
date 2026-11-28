@@ -195,3 +195,33 @@ unchanged: supporting a flag does not approve a lender role or a loan policy.
 DDK tests the flag-one refund layout itself; this repo tests that unknown bits
 are refused, and builds flag-one contracts only in its payout override tests. The frozen TypeScript goldens remain the flag-zero compatibility
 target; this extension does not claim TypeScript flag-one parity.
+
+### Staging deployment automation and recovery
+
+A push to `dev` runs the `stagex` workflow. The staging release job uses the
+`staging` GitHub environment's `TVC_ORG_ID`, `TVC_API_KEY_PUBLIC`, and
+`TVC_API_KEY_PRIVATE` to authenticate as `github-ci-staging`. Its hosted operator
+mappings come from `tvc-configs/tvc.config.ci.toml`; environment-only authentication
+must be converted to a saved CLI profile before using those operators.
+
+The CI user needs both raw-payload signing permission on the two configured operator
+wallets and the TVC create/approve/re-encrypt/switch/delete permissions. A missing
+signing policy caused deployment `24597275-4f9c-4ded-b4b3-455bd0f0fb1d` to stop at
+approval on October 23, 2026 (run `39681095096`, attempt 2). Later runs successfully
+approved, provisioned, and switched automatically; an old pending deployment is not
+evidence that the latest rollout failed. Start investigations from the latest
+workflow's deployment ID and the app's `liveDeploymentId`.
+
+The release script approves with both hosted operators, retries provisioning while
+the enclave attestation becomes available, waits for the configured replica count,
+and switches traffic. It then waits for the app's live deployment ID, the cluster's
+routing target, all runtime replicas, and a healthy JSON response from `/health` to
+agree before deleting the previous deployment. If verification times out, it requests
+rollback and checks the previous deployment's routing and health. Staging release
+jobs are serialized; mainnet continues to require manual operator approval.
+
+Run the offline rollout verification tests with:
+
+```sh
+python3 -m unittest discover -s scripts/tests -p 'test_tvc_*.py' -v
+```
