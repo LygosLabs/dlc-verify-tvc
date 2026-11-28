@@ -47,7 +47,8 @@ elif [ ! -f "${HOME}/.config/turnkey/tvc.config.toml" ]; then
   exit 1
 fi
 
-tvc_json() { tvc "$@" --non-interactive --message-format json; }
+# Every call is bounded so a hung request fails the step instead of running out the job's clock.
+tvc_json() { timeout "${TVC_CALL_TIMEOUT:-120}" tvc "$@" --non-interactive --message-format json; }
 
 # Like tvc_json but discards output on success and prints it on failure, so errors reach the log.
 tvc_quiet() {
@@ -179,10 +180,14 @@ echo "live deployment set to ${deploy_id}"
 if ! wait_for_live_deployment "${app_id}" "${deploy_id}" "${health_url}"; then
   echo "${deploy_id} did not become live and healthy within the routing verification window"
   if [ -n "${previous}" ] && [ "${previous}" != "${deploy_id}" ]; then
-    tvc_quiet app set-live-deploy --deploy-id "${previous}"
-    echo "rollback to ${previous} accepted; ${deploy_id} left for inspection"
-    if ! wait_for_live_deployment "${app_id}" "${previous}" "${health_url}"; then
-      echo "::error::rollback health could not be verified; manual attention required"
+    # A failed rollback must still reach the summary and exit below, not stop under set -e.
+    if ! tvc_quiet app set-live-deploy --deploy-id "${previous}"; then
+      echo "::error::rollback to ${previous} failed; ${deploy_id} is still live and needs manual attention"
+    else
+      echo "rollback to ${previous} accepted; ${deploy_id} left for inspection"
+      if ! wait_for_live_deployment "${app_id}" "${previous}" "${health_url}"; then
+        echo "::error::rollback health could not be verified; manual attention required"
+      fi
     fi
   else
     echo "::warning::no previous deployment to roll back to; ${deploy_id} needs manual attention"

@@ -7,15 +7,16 @@ import tempfile
 import unittest
 
 HELPER = Path(__file__).resolve().parents[1] / 'tvc-wait-live.sh'
-FAKE = r'''#!/usr/bin/env python3
+# sleep is a no-op shell stub; tvc and curl share one Python fake (started with -I -S to keep
+# per-call startup low, since the timeout cases make ~100 calls each).
+SLEEP = '#!/bin/sh\nexit 0\n'
+FAKE = r'''#!/usr/bin/env -S python3 -I -S
 import json, os, pathlib, sys
 root = pathlib.Path(os.environ['ROLLOUT_FIXTURE'])
 cfg = json.loads((root / 'case.json').read_text())
 name = pathlib.Path(sys.argv[0]).name
 with (root / 'calls').open('a') as log:
     log.write(name + ' ' + ' '.join(sys.argv[1:]) + '\n')
-if name == 'sleep':
-    sys.exit(0)
 if name == 'curl':
     print(cfg.get('body', '{"status":"healthy"}'))
     sys.exit(cfg.get('curl_exit', 0))
@@ -43,9 +44,9 @@ class LiveRolloutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / 'case.json').write_text(json.dumps(case))
-            for name in ['tvc', 'curl', 'sleep']:
+            for name, body in [('tvc', FAKE), ('curl', FAKE), ('sleep', SLEEP)]:
                 path = root / name
-                path.write_text(FAKE)
+                path.write_text(body)
                 path.chmod(0o755)
             env = os.environ.copy()
             env['PATH'] = str(root) + os.pathsep + env['PATH']
@@ -54,7 +55,7 @@ class LiveRolloutTests(unittest.TestCase):
                 ['bash', '-c', 'set -euo pipefail; source "$1"; '
                  'tvc_json() { tvc "$@"; }; '
                  'wait_for_live_deployment app new https://staging.invalid/health',
-                 'test', str(HELPER)], env=env, capture_output=True, text=True, timeout=20)
+                 'test', str(HELPER)], env=env, capture_output=True, text=True, timeout=60)
             return result, (root / 'calls').read_text(), int((root / 'attempt').read_text())
 
     def test_success_requires_matching_live_metadata_and_runtime(self):
@@ -69,6 +70,21 @@ class LiveRolloutTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(attempts, 30)
         self.assertNotIn('curl ', calls)
+
+    def test_routing_alone_cannot_pass_while_turnkey_reports_another_live_deployment(self):
+        result, calls, attempts = self.run_case(metadata_delay=99)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(attempts, 30)
+        self.assertNotIn('deploy get-status', calls)
+        self.assertNotIn('curl ', calls)
+        self.assertIn('last state seen: Turnkey reports live deployment previous', result.stdout)
+
+    def test_timeout_names_the_check_that_never_passed(self):
+        result, _, _ = self.run_case(routing_delay=99)
+        self.assertIn('last state seen: runtime status', result.stdout)
+        self.assertIn('"isTargeted":false', result.stdout)
+        result, _, _ = self.run_case(body='{"status":"starting"}')
+        self.assertIn('last state seen: health body {"status":"starting"}', result.stdout)
 
     def test_transient_api_failure_is_retried(self):
         result, _, attempts = self.run_case(api_errors=2)
