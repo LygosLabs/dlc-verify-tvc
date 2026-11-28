@@ -40,7 +40,7 @@ else:
 
 
 class LiveRolloutTests(unittest.TestCase):
-    def run_case(self, **case):
+    def run_case(self, budget='330', **case):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / 'case.json').write_text(json.dumps(case))
@@ -54,8 +54,8 @@ class LiveRolloutTests(unittest.TestCase):
             result = subprocess.run(
                 ['bash', '-c', 'set -euo pipefail; source "$1"; '
                  'tvc_json() { tvc "$@"; }; '
-                 'wait_for_live_deployment app new https://staging.invalid/health',
-                 'test', str(HELPER)], env=env, capture_output=True, text=True, timeout=60)
+                 'wait_for_live_deployment app new https://staging.invalid/health "$2"',
+                 'test', str(HELPER), budget], env=env, capture_output=True, text=True, timeout=60)
             return result, (root / 'calls').read_text(), int((root / 'attempt').read_text())
 
     def test_success_requires_matching_live_metadata_and_runtime(self):
@@ -85,6 +85,13 @@ class LiveRolloutTests(unittest.TestCase):
         self.assertIn('"isTargeted":false', result.stdout)
         result, _, _ = self.run_case(body='{"status":"starting"}')
         self.assertIn('last state seen: health body {"status":"starting"}', result.stdout)
+
+    def test_wall_clock_budget_stops_the_wait_before_thirty_attempts(self):
+        result, _, attempts = self.run_case(budget='0', routing_delay=99)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(attempts, 1)
+        self.assertIn('ran out its 0s budget after 1 attempts; last state seen: runtime status',
+                      result.stdout)
 
     def test_transient_api_failure_is_retried(self):
         result, _, attempts = self.run_case(api_errors=2)
