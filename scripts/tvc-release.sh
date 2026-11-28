@@ -47,17 +47,37 @@ elif [ ! -f "${HOME}/.config/turnkey/tvc.config.toml" ]; then
   exit 1
 fi
 
-tvc_json() { tvc "$@" --non-interactive --message-format json; }
+# Every call is bounded, and killed if it ignores SIGTERM, so a hung request fails the step instead
+# of running out the job's clock. Polling calls inside retry loops get a shorter bound (tvc_poll).
+tvc_json() { timeout -k 10 "${TVC_CALL_TIMEOUT:-120}" tvc "$@" --non-interactive --message-format json; }
+tvc_poll() { TVC_CALL_TIMEOUT="${TVC_POLL_TIMEOUT:-30}" tvc_json "$@"; }
 
 # Like tvc_json but discards output on success and prints it on failure, so errors reach the log.
 tvc_quiet() {
-  local out
-  if ! out=$(tvc_json "$@" 2>&1); then
-    echo "tvc $1 $2 failed:" >&2
-    echo "${out}" >&2
+  local out rc=0
+  out=$(tvc_json "$@" 2>&1) || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    if [ "${rc}" -eq 124 ] || [ "${rc}" -eq 137 ]; then
+      echo "tvc $1 $2 timed out after ${TVC_CALL_TIMEOUT:-120}s" >&2
+    else
+      echo "tvc $1 $2 failed:" >&2
+    fi
+    [ -z "${out}" ] || echo "${out}" >&2
     return 1
   fi
 }
+
+current_live() {
+  tvc_poll app list | jq -er --arg id "${app_id}" 'first(.apps[] | select(.id == $id) | .liveDeploymentId // "none")'
+}
+
+# Wall-clock budgets. Pre-switch stages are safe to abandon (the previous deployment stays live),
+# but once traffic moves the script must keep enough of the job's 60 minutes to verify and, if
+# needed, roll back and verify again (2 x 330s budgets plus call overruns, about 20 minutes).
+# So traffic is never switched after RELEASE_SWITCH_DEADLINE seconds of script time.
+provision_budget=${TVC_PROVISION_BUDGET:-600}
+replicas_budget=${TVC_REPLICAS_BUDGET:-600}
+switch_deadline=${RELEASE_SWITCH_DEADLINE:-2100}
 
 # The live deployment comes from `app list`, not `app status`: Turnkey answers app status with a 500
 # for an app that has never had a deployment, which can't be told apart from a real failure. Any
@@ -132,14 +152,16 @@ done
 
 # The enclave must boot and post its attestation before a share can be provisioned.
 for op in $(jq -r '.provisioners[]' "${release_cfg}"); do
+  deadline=$((SECONDS + provision_budget))
   for attempt in $(seq 1 30); do
     if tvc_quiet deploy provision --deploy-id "${deploy_id}" --operator-id "${op}" 2>"${TMPDIR:-/tmp}/provision.err"; then
       echo "provisioned by ${op}"
       break
     fi
-    if [ "${attempt}" -eq 30 ]; then
+    if [ "${attempt}" -eq 30 ] || [ "${SECONDS}" -ge "${deadline}" ]; then
       cat "${TMPDIR:-/tmp}/provision.err"
-      echo "provisioning by ${op} did not succeed"
+      echo "provisioning by ${op} did not succeed (${attempt} attempts); live deployment ${previous:-none} untouched"
+      summary "provisioning failed"
       exit 1
     fi
     sleep 20
@@ -150,39 +172,67 @@ done
 # never become live. The public health endpoint reflects the live deployment, so it is checked
 # after the switch and the previous deployment is re-targeted if it fails.
 replicas() {
-  tvc_json app status --app-id "${app_id}" \
+  tvc_poll app status --app-id "${app_id}" \
     | jq -r --arg id "${deploy_id}" '.deployments[] | select(.deploymentId == $id) | "\(.replicas.ready)/\(.replicas.desired)"'
 }
 
 # The deploy config pins the replica count; a config without one gets Turnkey's default (three at last check).
 want=$(jq -r '.replicas // 3' "${deploy_cfg}")
+deadline=$((SECONDS + replicas_budget))
 for attempt in $(seq 1 60); do
   ready=$(replicas) || ready=""
   if [ "${ready}" = "${want}/${want}" ]; then
     echo "${deploy_id} replicas ready (${ready})"
     break
   fi
-  if [ "${attempt}" -eq 60 ]; then
-    echo "${deploy_id} replicas not ready after 10 minutes (${ready:-none}); live deployment ${previous:-none} untouched"
+  if [ "${attempt}" -eq 60 ] || [ "${SECONDS}" -ge "${deadline}" ]; then
+    echo "${deploy_id} replicas not ready after ${attempt} checks (${ready:-none}); live deployment ${previous:-none} untouched"
+    summary "replicas not ready"
     exit 1
   fi
   sleep 10
 done
 
+if [ "${SECONDS}" -ge "${switch_deadline}" ]; then
+  echo "::error::${SECONDS}s elapsed, past the ${switch_deadline}s switch deadline; not switching traffic so verification and rollback fit in the job. Live deployment ${previous:-none} untouched"
+  summary "not switched: ran past the switch deadline"
+  exit 1
+fi
+
 # Turnkey makes an app's first deployment live by itself, and refuses to set it live again.
-live=$(tvc_json app list | jq -r --arg id "${app_id}" '.apps[] | select(.id == $id) | .liveDeploymentId // empty') || live=""
+live=$(current_live) || live=""
 if [ "${live}" != "${deploy_id}" ]; then
-  tvc_quiet app set-live-deploy --deploy-id "${deploy_id}"
+  if ! tvc_quiet app set-live-deploy --deploy-id "${deploy_id}"; then
+    # A timed-out or failed call may land server-side after it returns, so sample a few times
+    # before giving up. A request that lands even later can't be seen from here, so the error
+    # says how to undo it rather than promising the previous deployment is untouched.
+    for check in 1 2 3; do
+      live=$(current_live) || live=""
+      [ "${live}" != "${deploy_id}" ] || break
+      [ "${check}" -eq 3 ] || sleep 10
+    done
+    if [ -n "${live}" ] && [ "${live}" != "${deploy_id}" ]; then
+      echo "::error::set-live-deploy for ${deploy_id} failed and Turnkey still reported ${live} live after 3 checks over 20s. If the request lands later, ${deploy_id} goes live unverified: check tvc app list, and restore with tvc app set-live-deploy --deploy-id ${live}"
+      summary "failed to switch traffic"
+      exit 1
+    fi
+    echo "set-live-deploy for ${deploy_id} reported failure, but the live deployment is ${live:-unknown}; verifying and rolling back if needed"
+  fi
 fi
 echo "live deployment set to ${deploy_id}"
 
-if ! wait_for_live_deployment "${app_id}" "${deploy_id}" "${health_url}"; then
+if ! TVC_CALL_TIMEOUT="${TVC_POLL_TIMEOUT:-30}" wait_for_live_deployment "${app_id}" "${deploy_id}" "${health_url}"; then
   echo "${deploy_id} did not become live and healthy within the routing verification window"
   if [ -n "${previous}" ] && [ "${previous}" != "${deploy_id}" ]; then
-    tvc_quiet app set-live-deploy --deploy-id "${previous}"
-    echo "rollback to ${previous} accepted; ${deploy_id} left for inspection"
-    if ! wait_for_live_deployment "${app_id}" "${previous}" "${health_url}"; then
-      echo "::error::rollback health could not be verified; manual attention required"
+    # A failed rollback must still reach the summary and exit below, not stop under set -e.
+    if ! tvc_quiet app set-live-deploy --deploy-id "${previous}"; then
+      live=$(current_live) || live="unknown"
+      echo "::error::rollback to ${previous} failed; Turnkey reports live deployment ${live}; manual attention required"
+    else
+      echo "rollback to ${previous} accepted; ${deploy_id} left for inspection"
+      if ! TVC_CALL_TIMEOUT="${TVC_POLL_TIMEOUT:-30}" wait_for_live_deployment "${app_id}" "${previous}" "${health_url}"; then
+        echo "::error::rollback health could not be verified; manual attention required"
+      fi
     fi
   else
     echo "::warning::no previous deployment to roll back to; ${deploy_id} needs manual attention"
