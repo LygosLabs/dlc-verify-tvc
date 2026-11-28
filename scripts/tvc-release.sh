@@ -203,10 +203,16 @@ fi
 live=$(current_live) || live=""
 if [ "${live}" != "${deploy_id}" ]; then
   if ! tvc_quiet app set-live-deploy --deploy-id "${deploy_id}"; then
-    # A timed-out or failed call may still have landed server-side, so ask before giving up.
-    live=$(current_live) || live=""
+    # A timed-out or failed call may land server-side after it returns, so sample a few times
+    # before giving up. A request that lands even later can't be seen from here, so the error
+    # says how to undo it rather than promising the previous deployment is untouched.
+    for check in 1 2 3; do
+      live=$(current_live) || live=""
+      [ "${live}" != "${deploy_id}" ] || break
+      [ "${check}" -eq 3 ] || sleep 10
+    done
     if [ -n "${live}" ] && [ "${live}" != "${deploy_id}" ]; then
-      echo "::error::set-live-deploy for ${deploy_id} failed; live deployment ${live} untouched"
+      echo "::error::set-live-deploy for ${deploy_id} failed and Turnkey still reported ${live} live after 3 checks over 20s. If the request lands later, ${deploy_id} goes live unverified: check tvc app list, and restore with tvc app set-live-deploy --deploy-id ${live}"
       summary "failed to switch traffic"
       exit 1
     fi

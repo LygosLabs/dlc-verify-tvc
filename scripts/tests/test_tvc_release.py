@@ -45,6 +45,13 @@ if name == 'curl':
 
 cmd = args[:2]
 if cmd == ['app', 'list']:
+    # A switch request that lands only after a few more reads of the live deployment.
+    if state.get('lands_in') is not None:
+        state['lands_in'] -= 1
+        if state['lands_in'] <= 0:
+            state['live'] = 'new'
+            del state['lands_in']
+        state_path.write_text(json.dumps(state))
     out({'apps': [{'id': 'app', 'liveDeploymentId': state['live']}]})
 elif cmd == ['deploy', 'create']:
     out({'deploymentId': 'new'})
@@ -61,6 +68,9 @@ elif cmd == ['app', 'set-live-deploy']:
         # Stand-in for a request Turnkey may or may not have applied before the client hung.
         if hang.get('applied'):
             state['live'] = target
+            state_path.write_text(json.dumps(state))
+        elif hang.get('lands_in'):
+            state['lands_in'] = hang['lands_in']
             state_path.write_text(json.dumps(state))
         if hang.get('ignore_term'):
             import signal
@@ -179,8 +189,11 @@ class ReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(live, 'previous')
         self.assertIn('tvc app set-live-deploy timed out after 2s', result.stderr)
-        self.assertIn('::error::set-live-deploy for new failed; live deployment previous untouched',
-                      result.stdout)
+        self.assertIn('::error::set-live-deploy for new failed and Turnkey still reported previous '
+                      'live after 3 checks', result.stdout)
+        self.assertIn('restore with tvc app set-live-deploy --deploy-id previous', result.stdout)
+        switch = calls.index('tvc app set-live-deploy --deploy-id new')
+        self.assertEqual(calls[switch + 1:].count('tvc app list'), 3)
         self.assertNotIn('tvc app set-live-deploy --deploy-id previous', calls)
         self.assertTrue(self.no_calls(calls, 'tvc deploy delete'))
         self.assertIn('failed to switch traffic', summary)
@@ -188,6 +201,15 @@ class ReleaseRolloutTests(unittest.TestCase):
     def test_hung_switch_that_landed_is_verified_and_completes(self):
         result, calls, live, summary = self.run_release(
             extra_env={'TVC_CALL_TIMEOUT': '2'}, hang_set_live={'applied': True})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(live, 'new')
+        self.assertIn('reported failure, but the live deployment is new', result.stdout)
+        self.assertIn('tvc deploy delete --deploy-id previous', calls)
+        self.assertIn('## test: live', summary)
+
+    def test_switch_that_lands_after_the_first_recheck_is_verified_and_completes(self):
+        result, calls, live, summary = self.run_release(
+            extra_env={'TVC_CALL_TIMEOUT': '2'}, hang_set_live={'lands_in': 2})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(live, 'new')
         self.assertIn('reported failure, but the live deployment is new', result.stdout)
